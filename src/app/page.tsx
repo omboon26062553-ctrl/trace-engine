@@ -488,13 +488,9 @@ export default function TraceTelemetryDashboard() {
     petOrigin,
   ]);
 
-  // Initialize MapLibre Instance
+  // Initialize MapLibre Instance (once on mount)
   useEffect(() => {
     if (!mapContainerRef.current || mapRef.current) return;
-
-    maplibregl.setWorkerUrl(
-      'https://unpkg.com/maplibre-gl@4.7.1/dist/maplibre-gl-csp-worker.js'
-    );
 
     const map = new maplibregl.Map({
       container: mapContainerRef.current,
@@ -507,16 +503,41 @@ export default function TraceTelemetryDashboard() {
     map.addControl(new maplibregl.NavigationControl(), 'bottom-right');
     mapRef.current = map;
 
+    return () => {
+      map.remove();
+      mapRef.current = null;
+    };
+  }, []);
+
+  // Bind Canvas Telemetry Renderer to Map Camera Events
+  useEffect(() => {
+    const map = mapRef.current;
+    if (!map) return;
+
     map.on('move', renderTelemetryCanvas);
     map.on('zoom', renderTelemetryCanvas);
     map.on('styledata', renderTelemetryCanvas);
     map.on('load', renderTelemetryCanvas);
 
+    if (map.loaded()) {
+      renderTelemetryCanvas();
+    }
+
     return () => {
-      map.remove();
-      mapRef.current = null;
+      map.off('move', renderTelemetryCanvas);
+      map.off('zoom', renderTelemetryCanvas);
+      map.off('styledata', renderTelemetryCanvas);
+      map.off('load', renderTelemetryCanvas);
     };
   }, [renderTelemetryCanvas]);
+
+  // Resize map when switching back to Pillar 1 or 2
+  useEffect(() => {
+    if (activePillar === 'PILLAR_1_IMU' || activePillar === 'PILLAR_2_PET') {
+      mapRef.current?.resize();
+      renderTelemetryCanvas();
+    }
+  }, [activePillar, renderTelemetryCanvas]);
 
   // Interactive Map Click Handler
   useEffect(() => {
@@ -1384,7 +1405,7 @@ export default function TraceTelemetryDashboard() {
 
           <div
             ref={mapContainerRef}
-            className={`w-full h-full min-h-[560px] ${activePillar === 'PILLAR_1_IMU' || activePillar === 'PILLAR_2_PET'
+            className={`absolute inset-0 w-full h-full min-h-[560px] ${activePillar === 'PILLAR_1_IMU' || activePillar === 'PILLAR_2_PET'
               ? 'block'
               : 'hidden'
               }`}
