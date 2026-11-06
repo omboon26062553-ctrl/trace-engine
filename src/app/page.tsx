@@ -32,6 +32,11 @@ import {
   LocateFixed,
   MousePointerClick,
   RotateCcw,
+  Trophy,
+  Award,
+  UserCheck,
+  Compass,
+  Camera,
   Check,
 } from 'lucide-react';
 import {
@@ -113,7 +118,7 @@ const OSM_RASTER_STYLE: maplibregl.StyleSpecification = {
   },
   layers: [
     {
-      id: 'osm-Adjust',
+      id: 'osm-raster-layer',
       type: 'raster',
       source: 'osm',
       minzoom: 0,
@@ -129,6 +134,12 @@ export default function TraceCivicPortal() {
 
   const [activePillar, setActivePillar] = useState<ActivePillar>('PILLAR_1_IMU');
   const [mapStyleMode, setMapStyleMode] = useState<MapStyleMode>('OSM_STREET');
+
+  // Gamification State (Community Scout XP & Quests)
+  const [scoutXp, setScoutXp] = useState<number>(2450);
+  const [clearedNodeIds, setClearedNodeIds] = useState<string[]>([]);
+  const [showLeaderboardModal, setShowLeaderboardModal] = useState<boolean>(false);
+  const [xpToastMessage, setXpToastMessage] = useState<string | null>(null);
 
   // Pillar 1 State
   const [rawPoints, setRawPoints] = useState<TelemetryPoint[]>([]);
@@ -172,12 +183,46 @@ export default function TraceCivicPortal() {
   const [qrMode, setQrMode] = useState<'LOCKSCREEN' | 'STICKER'>('LOCKSCREEN');
   const qrCanvasRef = useRef<HTMLCanvasElement | null>(null);
 
+  const triggerXpReward = (amount: number, reason: string) => {
+    setScoutXp((prev) => prev + amount);
+    setXpToastMessage(`+${amount} XP // ${reason}`);
+    setTimeout(() => {
+      setXpToastMessage(null);
+    }, 3500);
+  };
+
+  // Verify/Clear a Drop Zone Node (Community Scout Negative-Confirmation Micro-Quest + Real-Time Probability Decay)
+  const handleScoutVerifyNode = (nodeId: string, e: React.MouseEvent) => {
+    e.stopPropagation();
+    if (clearedNodeIds.includes(nodeId)) return;
+    const nextCleared = [...clearedNodeIds, nodeId];
+    setClearedNodeIds(nextCleared);
+    triggerXpReward(
+      50,
+      `สำรวจรัศมี 15m จุด ${nodeId} ไม่พบของ — ลดน้ำหนัก P_drop และปรับลำดับจุดถัดไป`
+    );
+
+    // Real-time re-ranking to next highest probability drop zone
+    const nextTarget = [...scoredNodes]
+      .sort((a, b) => {
+        const probA = nextCleared.includes(a.id) ? a.dropProbability * 0.25 : a.dropProbability;
+        const probB = nextCleared.includes(b.id) ? b.dropProbability * 0.25 : b.dropProbability;
+        return probB - probA;
+      })[0];
+
+    if (nextTarget) {
+      setSelectedNode(nextTarget);
+      mapRef.current?.flyTo({ center: [nextTarget.lng, nextTarget.lat], zoom: 16.3 });
+    }
+  };
+
   // Initialize Demo Trajectory
   const resetDemoTrajectory = useCallback(() => {
     const mock = generateMockBangkokTrajectory();
     setRawPoints(mock.points);
     const evaluated = evaluateTrajectoryDropProbability(mock.points, mock.t0, mock.t1);
     setScoredNodes(evaluated);
+    setClearedNodeIds([]);
     setTrajectorySource('เส้นทางตัวอย่าง: สามย่าน - จุฬาฯ');
     const highest = [...evaluated].sort((a, b) => b.dropProbability - a.dropProbability)[0];
     setSelectedNode(highest || null);
@@ -228,7 +273,7 @@ export default function TraceCivicPortal() {
     );
   };
 
-  // Switch Map Style (OpenStreetMap Street View vs Dark Radar CSS Filter - No CARTO API key required)
+  // Switch Map Style (OpenStreetMap Street View vs Dark Radar CSS Filter - Zero API Key Required)
   const toggleMapStyle = () => {
     setMapStyleMode((prev) =>
       prev === 'OSM_STREET' ? 'CARTO_DARK' : 'OSM_STREET'
@@ -249,6 +294,7 @@ export default function TraceCivicPortal() {
       setRawPoints(parsed.points);
       const evaluated = evaluateTrajectoryDropProbability(parsed.points, parsed.t0, parsed.t1);
       setScoredNodes(evaluated);
+      setClearedNodeIds([]);
       setTrajectorySource(`ไฟล์นำเข้า: ${file.name}`);
 
       if (evaluated.length > 0) {
@@ -293,10 +339,28 @@ export default function TraceCivicPortal() {
         (pos) => {
           const idx = livePointsRef.current.length + 1;
           const pt: TelemetryPoint = {
-            id: `LIVE-${String(idx).padStart(2, '0')}`, lat: pos.coords.latitude + (Math.random() - 0.5) * 0.00015, lng: pos.coords.longitude + (Math.random() - 0.5) * 0.00015, timestamp: Date.now(), accelMagnitude: latestAccel, gyroRate: latestGyro, transitMode: (pos.coords.speed ?? 0) > 4 ? 'VEHICLE' : 'WALKING',
-          }; livePointsRef.current = [...livePointsRef.current, pt]; const pts = livePointsRef.current; setRawPoints(pts); const evaluated = evaluateTrajectoryDropProbability(pts, pts[0].timestamp - 1000, Date.now() + 1000); setScoredNodes(evaluated); mapRef.current?.flyTo({ center: [pt.lng, pt.lat], zoom: 16.2 });
-        }, () => {
-          const idx = livePointsRef.current.length + 1; const pt: TelemetryPoint = {
+            id: `LIVE-${String(idx).padStart(2, '0')}`,
+            lat: pos.coords.latitude + (Math.random() - 0.5) * 0.00015,
+            lng: pos.coords.longitude + (Math.random() - 0.5) * 0.00015,
+            timestamp: Date.now(),
+            accelMagnitude: latestAccel,
+            gyroRate: latestGyro,
+            transitMode: (pos.coords.speed ?? 0) > 4 ? 'VEHICLE' : 'WALKING',
+          };
+          livePointsRef.current = [...livePointsRef.current, pt];
+          const pts = livePointsRef.current;
+          setRawPoints(pts);
+          const evaluated = evaluateTrajectoryDropProbability(
+            pts,
+            pts[0].timestamp - 1000,
+            Date.now() + 1000
+          );
+          setScoredNodes(evaluated);
+          mapRef.current?.flyTo({ center: [pt.lng, pt.lat], zoom: 16.2 });
+        },
+        () => {
+          const idx = livePointsRef.current.length + 1;
+          const pt: TelemetryPoint = {
             id: `LIVE-${String(idx).padStart(2, '0')}`,
             lat: 13.7385 + idx * 0.00035,
             lng: 100.5355 + idx * 0.00035,
@@ -340,6 +404,7 @@ export default function TraceCivicPortal() {
       });
       const data = await res.json();
       setSpatialMatches(data.matches || []);
+      triggerXpReward(30, 'สแกนเรดาร์ PostGIS เชิงพื้นที่สำเร็จ');
     } finally {
       setIsCheckingRadar(false);
     }
@@ -375,9 +440,11 @@ export default function TraceCivicPortal() {
 
       scoredNodes.forEach((pt) => {
         const { x, y } = map.project([pt.lng, pt.lat]);
-        const isHighRisk = pt.dropProbability >= 0.55;
+        const isCleared = clearedNodeIds.includes(pt.id);
+        const effectiveProb = isCleared ? pt.dropProbability * 0.25 : pt.dropProbability;
+        const isHighRisk = effectiveProb >= 0.55;
 
-        if (pt.isGhostVectorOrigin) {
+        if (pt.isGhostVectorOrigin && !isCleared) {
           ctx.save();
           ctx.beginPath();
           ctx.setLineDash([6, 4]);
@@ -397,30 +464,38 @@ export default function TraceCivicPortal() {
 
         if (isHighRisk) {
           ctx.beginPath();
-          ctx.arc(x, y, 24 * pt.dropProbability + 8, 0, Math.PI * 2);
+          ctx.arc(x, y, 24 * effectiveProb + 8, 0, Math.PI * 2);
           ctx.fillStyle =
-            pt.dropProbability > 0.7 ? 'rgba(220, 38, 38, 0.25)' : 'rgba(217, 119, 6, 0.25)';
+            effectiveProb > 0.7 ? 'rgba(220, 38, 38, 0.25)' : 'rgba(217, 119, 6, 0.25)';
           ctx.fill();
         }
 
         ctx.beginPath();
         ctx.arc(x, y, isHighRisk ? 8 : 6, 0, Math.PI * 2);
-        ctx.fillStyle =
-          pt.dropProbability > 0.7 ? '#DC2626' : isHighRisk ? '#D97706' : '#2563EB';
+        ctx.fillStyle = isCleared
+          ? '#10B981'
+          : effectiveProb > 0.7
+            ? '#DC2626'
+            : isHighRisk
+              ? '#D97706'
+              : '#2563EB';
         ctx.fill();
         ctx.strokeStyle = '#FFFFFF';
         ctx.lineWidth = 2.5;
         ctx.stroke();
 
-        const labelText = `${pt.id}: โอกาสตก ${(pt.dropProbability * 100).toFixed(0)}%`;
+        const scoreInt = Math.round(effectiveProb * 100);
+        const labelText = isCleared
+          ? `${pt.id}: สำรวจแล้ว (Cleared)`
+          : `${pt.id}: คะแนนโอกาสพบ ${scoreInt}/100`;
         ctx.font = 'bold 11px sans-serif';
         const textWidth = ctx.measureText(labelText).width;
         ctx.fillStyle = 'rgba(255, 255, 255, 0.94)';
         ctx.fillRect(x + 10, y - 10, textWidth + 12, 20);
-        ctx.strokeStyle = '#CBD5E1';
+        ctx.strokeStyle = isCleared ? '#10B981' : '#CBD5E1';
         ctx.lineWidth = 1;
         ctx.strokeRect(x + 10, y - 10, textWidth + 12, 20);
-        ctx.fillStyle = '#0F172A';
+        ctx.fillStyle = isCleared ? '#065F46' : '#0F172A';
         ctx.fillText(labelText, x + 16, y + 4);
       });
 
@@ -453,7 +528,8 @@ export default function TraceCivicPortal() {
 
         const grad = ctx.createRadialGradient(x, y, 2, x, y, radius);
         if (cell.probability > 0.65) {
-          grad.addColorStop(0, `rgba(220, 38, 38, ${cell.probability * 0.65})`); grad.addColorStop(1, 'rgba(220, 38, 38, 0)');
+          grad.addColorStop(0, `rgba(220, 38, 38, ${cell.probability * 0.65})`);
+          grad.addColorStop(1, 'rgba(220, 38, 38, 0)');
         } else {
           grad.addColorStop(0, `rgba(217, 119, 6, ${cell.probability * 0.55})`);
           grad.addColorStop(1, 'rgba(37, 99, 235, 0)');
@@ -488,13 +564,14 @@ export default function TraceCivicPortal() {
   }, [
     activePillar,
     scoredNodes,
+    clearedNodeIds,
     radianceCells,
     sightingCoord,
     spatialMatches,
     petOrigin,
   ]);
 
-  // Initialize MapLibre Instance with OpenStreetMap Guaranteed Tiles + Worker URL + ResizeObserver
+  // Initialize MapLibre Instance Once with OpenStreetMap Guaranteed Tiles + Worker URL + ResizeObserver
   useEffect(() => {
     const container = mapContainerRef.current;
     if (!container || mapRef.current) return;
@@ -521,13 +598,10 @@ export default function TraceCivicPortal() {
         ],
         { padding: 65, duration: 0 }
       );
-      renderTelemetryCanvas();
     });
 
-    // Watch container size so the map never renders blank
     const resizeObserver = new ResizeObserver(() => {
       map.resize();
-      renderTelemetryCanvas();
     });
     resizeObserver.observe(container);
 
@@ -538,7 +612,7 @@ export default function TraceCivicPortal() {
     };
   }, []);
 
-  // Bind Canvas Telemetry Renderer to Map Camera Events
+  // Bind Canvas Telemetry Renderer to Map Camera Events Without Re-creating Map
   useEffect(() => {
     const map = mapRef.current;
     if (!map) return;
@@ -562,7 +636,6 @@ export default function TraceCivicPortal() {
     };
   }, [renderTelemetryCanvas]);
 
-  // Trigger map resize whenever user switches back to map tabs
   useEffect(() => {
     if (activePillar === 'PILLAR_1_IMU' || activePillar === 'PILLAR_2_PET') {
       setTimeout(() => {
@@ -601,12 +674,14 @@ export default function TraceCivicPortal() {
         setScoredNodes(evaluated);
         setSelectedNode(evaluated[evaluated.length - 1]);
         setTrajectorySource('เส้นทางกำหนดเองบนแผนที่จริง');
+        triggerXpReward(25, 'ปักหมุดวิเคราะห์จุดเสี่ยงใหม่บนแผนที่');
       } else if (activePillar === 'PILLAR_2_PET') {
         if (petClickMode === 'MOVE_ORIGIN') {
           setPetOrigin({ lat, lng });
           setSightingCoord(null);
         } else {
           setSightingCoord({ lat, lng });
+          triggerXpReward(100, 'แจ้งเบาะแสจุดพบเห็นสัตว์เลี้ยงช่วยบีบวงรัศมี');
         }
       }
     };
@@ -660,6 +735,7 @@ export default function TraceCivicPortal() {
             ctx.strokeStyle = '#059669';
             ctx.lineWidth = Math.max(2, img.width * 0.004);
             ctx.strokeRect(x, y, w, h);
+
             ctx.fillStyle = '#059669';
             ctx.font = `bold ${Math.max(12, Math.floor(img.width * 0.022))}px monospace`;
             ctx.fillText(`UNLOCKED // ${item.label}`, x + 6, Math.max(16, y - 6));
@@ -801,6 +877,7 @@ export default function TraceCivicPortal() {
         const data = await res.json();
         if (!res.ok) throw new Error(data.error || 'Gemini Vision request failed');
         setForensicData(data);
+        triggerXpReward(150, 'อัปโหลดภาพสิ่งของเข้าตู้นิรภัย AI สำเร็จ');
       } catch (err: unknown) {
         setScanError(err instanceof Error ? err.message : 'Error scanning image');
       } finally {
@@ -831,6 +908,9 @@ export default function TraceCivicPortal() {
       const data = await res.json();
       if (!res.ok) throw new Error(data.error || 'Failed to grade ownership claim');
       setClaimResult(data);
+      if (data.is_verified) {
+        triggerXpReward(200, 'ยืนยันความเป็นเจ้าของสำเร็จและปลดล็อกจุดนัดรับ');
+      }
     } catch (err: unknown) {
       setScanError(err instanceof Error ? err.message : 'Error grading claim');
     } finally {
@@ -838,37 +918,24 @@ export default function TraceCivicPortal() {
     }
   };
 
-  const steps: Array<{ id: ActivePillar; stepNum: string; title: string; subtitle: string }> = [
-    {
-      id: 'PILLAR_1_IMU',
-      stepNum: '1',
-      title: '1. วิเคราะห์จุดทำของตก',
-      subtitle: 'IMU Drop Trajectory',
-    },
-    {
-      id: 'PILLAR_2_PET',
-      stepNum: '2',
-      title: '2. จำลองรัศมีสัตว์เลี้ยงหาย',
-      subtitle: 'Pet Cellular Automata',
-    },
-    {
-      id: 'PILLAR_3_VISION',
-      stepNum: '3',
-      title: '3. แจ้งเจอของ & ยืนยันเจ้าของ',
-      subtitle: 'Gemini AI Claim Vault',
-    },
-    {
-      id: 'PILLAR_4_QR',
-      stepNum: '4',
-      title: '4. สร้าง QR ป้องกันของหาย',
-      subtitle: 'Samaritan Shield Tag',
-    },
-  ];
+  // Compute Lumi-Style Circular Recovery Score (0 - 100)
+  const activeRecoveryScore = React.useMemo(() => {
+    const target = selectedNode || scoredNodes[0];
+    if (!target) return 78;
+    const isCleared = clearedNodeIds.includes(target.id);
+    const base = Math.round(target.dropProbability * 100);
+    const matchBonus = spatialMatches.length > 0 ? 12 : 0;
+    const rawScore = isCleared ? Math.max(15, Math.round(base * 0.35)) : Math.min(98, base + matchBonus);
+    return rawScore;
+  }, [selectedNode, scoredNodes, clearedNodeIds, spatialMatches]);
+
+  const circumference = 2 * Math.PI * 36;
+  const strokeDashoffset = circumference - (activeRecoveryScore / 100) * circumference;
 
   return (
     <div className="min-h-screen bg-[#F8FAFC] text-slate-900 font-sans flex flex-col">
-      {/* Top Civic-Tech Trust Header */}
-      <header className="bg-white border-b border-slate-200 px-6 py-3.5 shadow-xs">
+      {/* Top Civic-Tech Header + Giggles Maps Style XP & Quests Counter */}
+      <header className="bg-white border-b border-slate-200 px-6 py-3 shadow-xs">
         <div className="max-w-[1440px] mx-auto flex flex-wrap items-center justify-between gap-4">
           <div className="flex items-center gap-3">
             <div className="w-10 h-10 rounded-xl bg-blue-600 flex items-center justify-center text-white shadow-xs">
@@ -877,11 +944,11 @@ export default function TraceCivicPortal() {
             <div>
               <div className="flex items-center gap-2.5">
                 <h1 className="text-lg font-bold tracking-tight text-slate-900">
-                  TRACE // ระบบโครงข่ายพิกัดกู้คืนของหายและสัตว์เลี้ยงอัจฉริยะ
+                  TRACE // โครงข่ายพิกัดกู้คืนของหายและจำลองรัศมีสัตว์เลี้ยงด้วย AI
                 </h1>
                 <span className="hidden sm:inline-flex items-center gap-1 px-2.5 py-0.5 rounded-full text-xs font-semibold bg-blue-50 text-blue-700 border border-blue-200">
                   <ShieldCheck className="w-3.5 h-3.5 text-blue-600" />
-                  Verified PostGIS & Gemini AI
+                  PostGIS & Gemini AI
                 </span>
               </div>
               <p className="text-xs text-slate-500 mt-0.5">
@@ -890,51 +957,124 @@ export default function TraceCivicPortal() {
             </div>
           </div>
 
-          <div className="flex items-center gap-2">
+          {/* Giggles Maps Inspired Community Scout XP & Quests Widget */}
+          <div className="flex items-center gap-2.5">
+            {xpToastMessage && (
+              <div className="px-3 py-1.5 rounded-xl bg-emerald-600 text-white text-xs font-bold shadow-sm animate-bounce">
+                {xpToastMessage}
+              </div>
+            )}
+
+            <div className="flex items-center gap-2 bg-amber-50 border border-amber-300 px-3.5 py-1.5 rounded-xl">
+              <Trophy className="w-4 h-4 text-amber-600" />
+              <div className="text-xs">
+                <span className="font-extrabold text-amber-900">{scoutXp.toLocaleString()} XP</span>
+                <span className="text-amber-700 ml-1.5 hidden sm:inline">• Scout Rank: Gold</span>
+              </div>
+            </div>
+
             <button
-              onClick={() => setActivePillar('PILLAR_3_VISION')}
-              className="px-4 py-2 rounded-lg bg-blue-600 hover:bg-blue-700 text-white text-xs font-semibold shadow-xs transition cursor-pointer"
+              onClick={() => setShowLeaderboardModal(!showLeaderboardModal)}
+              className="px-3.5 py-2 rounded-xl border border-slate-300 bg-white hover:bg-slate-50 text-slate-800 text-xs font-bold flex items-center gap-1.5 shadow-xs transition cursor-pointer"
             >
-              แจ้งพบสิ่งของ / ยืนยันสิทธิ์รับคืน
+              <Award className="w-4 h-4 text-blue-600" />
+              <span>ภารกิจอาสา & แลกรางวัล ({clearedNodeIds.length}/3)</span>
             </button>
           </div>
         </div>
+
+        {/* Collapsible Quests & Leaderboard Drawer */}
+        {showLeaderboardModal && (
+          <div className="max-w-[1440px] mx-auto mt-3 p-4 rounded-2xl bg-slate-900 text-white border border-slate-700 grid grid-cols-1 md:grid-cols-3 gap-4 text-xs">
+            <div className="space-y-1.5">
+              <div className="font-bold text-amber-400 flex items-center gap-1.5">
+                <Award className="w-4 h-4" />
+                <span>ภารกิจอาสาสมัครวันนี้ (Community Scout Quests)</span>
+              </div>
+              <p className="text-slate-300">
+                1. ช่วยเดินสำรวจจุดเสี่ยงสีแดงและกดยืนยันผล ({clearedNodeIds.length}/3 จุด) — รับ +50 XP/จุด
+              </p>
+              <p className="text-slate-300">
+                2. คลิกแจ้งเบาะแสจุดพบเห็นสัตว์เลี้ยงบนแผนที่ — รับ +100 XP
+              </p>
+            </div>
+            <div className="space-y-1.5 border-t md:border-t-0 md:border-l border-slate-700 md:pl-4 pt-2 md:pt-0">
+              <div className="font-bold text-sky-400">อันดับอาสาสมัครประจำมหาวิทยาลัย (Leaderboard)</div>
+              <p className="text-slate-200">1. คุณภูรีภัทร (คุณ) — {scoutXp.toLocaleString()} XP</p>
+              <p className="text-slate-400">2. กิตติพงศ์ (วิศวกรรมศาสตร์) — 2,310 XP</p>
+              <p className="text-slate-400">3. ณัฐธิดา (สถาปัตยกรรมศาสตร์) — 1,980 XP</p>
+            </div>
+            <div className="space-y-1.5 border-t md:border-t-0 md:border-l border-slate-700 md:pl-4 pt-2 md:pt-0 flex flex-col justify-between">
+              <div>
+                <div className="font-bold text-emerald-400">สิทธิพิเศษแลกแต้ม XP ในมหาวิทยาลัย</div>
+                <p className="text-slate-300">ใช้ 500 XP แลกส่วนลดร้านกาแฟและโรงอาหารในรัศมีแคมปัสได้ทันที</p>
+              </div>
+              <button
+                onClick={() => setShowLeaderboardModal(false)}
+                className="self-end px-3 py-1 rounded-lg bg-slate-700 hover:bg-slate-600 text-white font-semibold cursor-pointer"
+              >
+                ปิดหน้าต่างภารกิจ
+              </button>
+            </div>
+          </div>
+        )}
       </header>
 
-      {/* Civic Step-by-Step Progress Bar */}
-      <div className="bg-white border-b border-slate-200 px-6 py-3">
-        <div className="max-w-[1440px] mx-auto grid grid-cols-2 lg:grid-cols-4 gap-3">
-          {steps.map((st) => {
-            const isActive = activePillar === st.id;
-            return (
-              <button
-                key={st.id}
-                onClick={() => setActivePillar(st.id)}
-                className={`flex items-center gap-3 p-2.5 rounded-xl border text-left transition cursor-pointer ${isActive
-                  ? 'bg-amber-50/90 border-amber-300 shadow-xs'
-                  : 'bg-slate-50 hover:bg-slate-100 border-slate-200'
-                  }`}
-              >
-                <div
-                  className={`w-7 h-7 rounded-full flex items-center justify-center text-xs font-bold shrink-0 ${isActive
-                    ? 'bg-blue-600 text-white'
-                    : 'bg-slate-200 text-slate-700'
-                    }`}
-                >
-                  <Check className="w-3.5 h-3.5" />
-                </div>
-                <div className="overflow-hidden">
-                  <div
-                    className={`text-xs font-bold truncate ${isActive ? 'text-slate-900' : 'text-slate-700'
-                      }`}
-                  >
-                    {st.title}
-                  </div>
-                  <div className="text-[11px] text-slate-500 truncate">{st.subtitle}</div>
-                </div>
-              </button>
-            );
-          })}
+      {/* Growa-Inspired Hackathon Judge Role Switcher Banner */}
+      <div className="bg-amber-100/90 border-b border-amber-300 px-6 py-2.5">
+        <div className="max-w-[1440px] mx-auto flex flex-wrap items-center justify-between gap-3">
+          <div className="flex items-center gap-2 text-xs font-bold text-amber-950">
+            <span className="px-2 py-0.5 rounded bg-amber-500 text-white uppercase tracking-wider text-[10px]">
+              สำหรับกรรมการ (Judge Role Switcher)
+            </span>
+            <span>สลับดูมุมมองผู้ใช้งานทั้ง 4 บทบาทได้ในคลิกเดียวโดยไม่ต้องล็อกอินใหม่:</span>
+          </div>
+
+          <div className="flex flex-wrap items-center gap-2">
+            <button
+              onClick={() => setActivePillar('PILLAR_1_IMU')}
+              className={`px-3 py-1.5 rounded-xl text-xs font-bold flex items-center gap-1.5 transition cursor-pointer ${activePillar === 'PILLAR_1_IMU'
+                  ? 'bg-blue-600 text-white shadow-xs'
+                  : 'bg-white hover:bg-amber-50 text-slate-800 border border-amber-300'
+                }`}
+            >
+              <UserCheck className="w-3.5 h-3.5" />
+              <span>1. โหมดคนทำของหาย (Loser View)</span>
+            </button>
+
+            <button
+              onClick={() => setActivePillar('PILLAR_2_PET')}
+              className={`px-3 py-1.5 rounded-xl text-xs font-bold flex items-center gap-1.5 transition cursor-pointer ${activePillar === 'PILLAR_2_PET'
+                  ? 'bg-blue-600 text-white shadow-xs'
+                  : 'bg-white hover:bg-amber-50 text-slate-800 border border-amber-300'
+                }`}
+            >
+              <Compass className="w-3.5 h-3.5" />
+              <span>2. โหมดตามหาสัตว์เลี้ยง (Pet Radiance View)</span>
+            </button>
+
+            <button
+              onClick={() => setActivePillar('PILLAR_3_VISION')}
+              className={`px-3 py-1.5 rounded-xl text-xs font-bold flex items-center gap-1.5 transition cursor-pointer ${activePillar === 'PILLAR_3_VISION'
+                  ? 'bg-blue-600 text-white shadow-xs'
+                  : 'bg-white hover:bg-amber-50 text-slate-800 border border-amber-300'
+                }`}
+            >
+              <Camera className="w-3.5 h-3.5" />
+              <span>3. โหมดคนเก็บของได้ (Finder & AI Vault)</span>
+            </button>
+
+            <button
+              onClick={() => setActivePillar('PILLAR_4_QR')}
+              className={`px-3 py-1.5 rounded-xl text-xs font-bold flex items-center gap-1.5 transition cursor-pointer ${activePillar === 'PILLAR_4_QR'
+                  ? 'bg-blue-600 text-white shadow-xs'
+                  : 'bg-white hover:bg-amber-50 text-slate-800 border border-amber-300'
+                }`}
+            >
+              <QrCode className="w-3.5 h-3.5" />
+              <span>4. โหมดสร้างป้าย QR ป้องกันของหาย</span>
+            </button>
+          </div>
         </div>
       </div>
 
@@ -944,23 +1084,73 @@ export default function TraceCivicPortal() {
         <aside className="lg:col-span-4 space-y-4">
           {activePillar === 'PILLAR_1_IMU' && (
             <>
+              {/* Lumi-Inspired Circular Recovery Probability Score Card */}
+              <div className="bg-white border border-slate-200 rounded-2xl p-4 shadow-xs flex items-center gap-4">
+                <div className="relative w-24 h-24 flex items-center justify-center shrink-0">
+                  <svg className="w-24 h-24 -rotate-90" viewBox="0 0 88 88">
+                    <circle
+                      cx="44"
+                      cy="44"
+                      r="36"
+                      stroke="#E2E8F0"
+                      strokeWidth="8"
+                      fill="transparent"
+                    />
+                    <circle
+                      cx="44"
+                      cy="44"
+                      r="36"
+                      stroke={
+                        activeRecoveryScore >= 70
+                          ? '#DC2626'
+                          : activeRecoveryScore >= 45
+                            ? '#D97706'
+                            : '#10B981'
+                      }
+                      strokeWidth="8"
+                      strokeDasharray={circumference}
+                      strokeDashoffset={strokeDashoffset}
+                      strokeLinecap="round"
+                      fill="transparent"
+                    />
+                  </svg>
+                  <div className="absolute inset-0 flex flex-col items-center justify-center">
+                    <span className="text-xl font-extrabold text-slate-900">
+                      {activeRecoveryScore}
+                    </span>
+                    <span className="text-[10px] font-bold text-slate-400">/ 100</span>
+                  </div>
+                </div>
+
+                <div className="space-y-1 text-xs">
+                  <div className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full bg-red-50 text-red-700 font-bold text-[11px] border border-red-200">
+                    Recovery Probability Score
+                  </div>
+                  <h3 className="text-sm font-bold text-slate-900">
+                    จุดเป้าหมาย: {selectedNode?.id || 'NODE-05'}
+                  </h3>
+                  <p className="text-slate-600 leading-relaxed">
+                    {activeRecoveryScore >= 70
+                      ? 'แนะนำให้วิ่งไปสำรวจจุดนี้เป็นอันดับแรก มีโอกาสพบของคืนสูงที่สุด'
+                      : 'จุดนี้ได้รับการสำรวจแล้ว หรือมีความเสี่ยงระดับปานกลาง'}
+                  </p>
+                </div>
+              </div>
+
               <div className="bg-white border border-slate-200 rounded-2xl p-5 shadow-xs space-y-3.5">
                 <div className="flex items-center justify-between">
                   <h2 className="text-sm font-bold text-slate-900">
-                    วิเคราะห์เส้นทางและจุดเสี่ยงทำของตก
+                    เครื่องมือวิเคราะห์เส้นทางและเรดาร์ PostGIS
                   </h2>
                   <Cpu className="w-4 h-4 text-blue-600" />
                 </div>
-                <p className="text-xs text-slate-600 leading-relaxed">
-                  คำนวณความน่าจะเป็นของจุดที่ทำของตก (<code className="text-blue-700 font-semibold">P_drop</code>) จากการหยุดนิ่งชั่วขณะ แรงกระตุกเซนเซอร์ และการเปลี่ยนยานพาหนะ
-                </p>
 
                 <div className="grid grid-cols-2 gap-2">
                   <button
                     onClick={() => setIsClickToAddNode(!isClickToAddNode)}
                     className={`py-2.5 px-3 rounded-xl border text-xs font-semibold flex items-center justify-center gap-1.5 transition cursor-pointer ${isClickToAddNode
-                      ? 'bg-blue-600 border-blue-600 text-white shadow-xs'
-                      : 'bg-slate-50 hover:bg-slate-100 border-slate-300 text-slate-800'
+                        ? 'bg-blue-600 border-blue-600 text-white shadow-xs'
+                        : 'bg-slate-50 hover:bg-slate-100 border-slate-300 text-slate-800'
                       }`}
                   >
                     <MousePointerClick className="w-4 h-4" />
@@ -990,7 +1180,22 @@ export default function TraceCivicPortal() {
 
                   <button
                     onClick={toggleLiveImuRecording}
-                    className={`flex items-center justify-center gap-1.5 py-2.5 px-3 rounded-xl border text-xs font-semibold transition cursor-pointer ${isRecordingImu ? 'border-red-600 bg-red-50 text-red-700 animate-pulse' : 'border-amber-300 bg-amber-50 hover:bg-amber-100 text-amber-900'}`} > <Activity className="w-4 h-4" /> <span>{isRecordingImu ? 'กำลังบันทึกเซนเซอร์...' : 'บันทึกเซนเซอร์มือถือสด'}</span> </button> </div>  <button onClick={runSpatialIntersectionRadar} disabled={isCheckingRadar} className="w-full py-2.5 px-4 rounded-xl bg-blue-600 hover:bg-blue-700 text-white text-xs font-semibold flex items-center justify-center gap-2 shadow-xs transition cursor-pointer" > <Radio className={`w-4 h-4 ${isCheckingRadar ? 'animate-spin' : ''}`} />
+                    className={`flex items-center justify-center gap-1.5 py-2.5 px-3 rounded-xl border text-xs font-semibold transition cursor-pointer ${isRecordingImu
+                        ? 'border-red-600 bg-red-50 text-red-700 animate-pulse'
+                        : 'border-amber-300 bg-amber-50 hover:bg-amber-100 text-amber-900'
+                      }`}
+                  >
+                    <Activity className="w-4 h-4" />
+                    <span>{isRecordingImu ? 'กำลังบันทึกเซนเซอร์...' : 'บันทึกเซนเซอร์มือถือสด'}</span>
+                  </button>
+                </div>
+
+                <button
+                  onClick={runSpatialIntersectionRadar}
+                  disabled={isCheckingRadar}
+                  className="w-full py-2.5 px-4 rounded-xl bg-blue-600 hover:bg-blue-700 text-white text-xs font-semibold flex items-center justify-center gap-2 shadow-xs transition cursor-pointer"
+                >
+                  <Radio className={`w-4 h-4 ${isCheckingRadar ? 'animate-spin' : ''}`} />
                   <span>
                     {isCheckingRadar
                       ? 'กำลังค้นหาในฐานข้อมูล PostGIS...'
@@ -1019,7 +1224,7 @@ export default function TraceCivicPortal() {
                         onClick={() => setActivePillar('PILLAR_3_VISION')}
                         className="text-xs text-blue-600 hover:underline font-bold pt-1 cursor-pointer"
                       >
-                        ไปยังหน้ายืนยันความเป็นเจ้าของเพื่อรับคืน
+                        ไปยังโหมดคนเก็บของได้ / ยืนยันความเป็นเจ้าของ
                       </button>
                     </div>
                   ))}
@@ -1028,13 +1233,17 @@ export default function TraceCivicPortal() {
 
               <div className="bg-white border border-slate-200 rounded-2xl p-5 shadow-xs space-y-3">
                 <h3 className="text-xs font-bold uppercase tracking-wider text-slate-500">
-                  รายการจุดพิกัดตามเส้นทาง ({scoredNodes.length} จุด)
+                  จุดพิกัดตามเส้นทาง & ภารกิจอาสาสมัคร ({scoredNodes.length} จุด)
                 </h3>
-                <div className="space-y-2.5 max-h-[340px] overflow-y-auto pr-1">
+                <div className="space-y-2.5 max-h-[300px] overflow-y-auto pr-1">
                   {scoredNodes.map((node) => {
                     const isSelected = selectedNode?.id === node.id;
-                    const isHigh = node.dropProbability > 0.7;
-                    const isMed = node.dropProbability > 0.45;
+                    const isCleared = clearedNodeIds.includes(node.id);
+                    const score = isCleared
+                      ? Math.round(node.dropProbability * 25)
+                      : Math.round(node.dropProbability * 100);
+                    const isHigh = score >= 70;
+                    const isMed = score >= 45;
                     return (
                       <div
                         key={node.id}
@@ -1042,9 +1251,9 @@ export default function TraceCivicPortal() {
                           setSelectedNode(node);
                           mapRef.current?.flyTo({ center: [node.lng, node.lat], zoom: 16.5 });
                         }}
-                        className={`p-3.5 rounded-xl border cursor-pointer transition ${isSelected
-                          ? 'border-blue-600 bg-blue-50/50 shadow-xs'
-                          : 'border-slate-200 bg-slate-50/60 hover:bg-slate-100'
+                        className={`p-3.5 rounded-xl border cursor-pointer transition space-y-2 ${isSelected
+                            ? 'border-blue-600 bg-blue-50/50 shadow-xs'
+                            : 'border-slate-200 bg-slate-50/60 hover:bg-slate-100'
                           }`}
                       >
                         <div className="flex items-center justify-between">
@@ -1052,23 +1261,44 @@ export default function TraceCivicPortal() {
                             จุดพิกัด {node.id}
                           </span>
                           <span
-                            className={`text-xs font-bold px-2.5 py-0.5 rounded-full ${isHigh
-                              ? 'bg-red-100 text-red-800 border border-red-200'
-                              : isMed
-                                ? 'bg-amber-100 text-amber-800 border border-amber-200'
-                                : 'bg-slate-200 text-slate-700'
+                            className={`text-xs font-bold px-2.5 py-0.5 rounded-full ${isCleared
+                                ? 'bg-emerald-100 text-emerald-800 border border-emerald-200'
+                                : isHigh
+                                  ? 'bg-red-100 text-red-800 border border-red-200'
+                                  : isMed
+                                    ? 'bg-amber-100 text-amber-800 border border-amber-200'
+                                    : 'bg-slate-200 text-slate-700'
                               }`}
                           >
-                            โอกาสตก {(node.dropProbability * 100).toFixed(1)}%
+                            {isCleared ? 'สำรวจแล้ว' : `Recovery Score: ${score}/100`}
                           </span>
                         </div>
-                        <p className="text-xs font-medium text-blue-700 mt-1">
+
+                        <p className="text-xs font-medium text-blue-700">
                           สาเหตุ: {node.anomalyReason}
                         </p>
-                        <div className="grid grid-cols-3 gap-2 mt-2 text-[11px] text-slate-500">
-                          <div>หยุดนิ่ง: {node.dwellScore}</div>
-                          <div>แรงกระตุก: {node.jerkScore}</div>
-                          <div>เปลี่ยนพาหนะ: {node.transitScore}</div>
+
+                        <div className="flex items-center justify-between pt-1 border-t border-slate-200/80">
+                          <span className="text-[11px] text-slate-500">
+                            กระตุก: {node.jerkScore} • หยุดนิ่ง: {node.dwellScore}
+                          </span>
+
+                          <button
+                            type="button"
+                            onClick={(e) => handleScoutVerifyNode(node.id, e)}
+                            disabled={isCleared}
+                            className={`px-2.5 py-1 rounded-lg text-[11px] font-bold flex items-center gap-1 transition cursor-pointer ${isCleared
+                                ? 'bg-emerald-50 text-emerald-700 cursor-default'
+                                : 'bg-amber-100 hover:bg-amber-200 text-amber-900 border border-amber-300'
+                              }`}
+                          >
+                            <Check className="w-3 h-3" />
+                            <span>
+                              {isCleared
+                                ? 'รับ +50 XP แล้ว'
+                                : 'ช่วยยืนยันสำรวจจุดนี้ (+50 XP)'}
+                            </span>
+                          </button>
                         </div>
                       </div>
                     );
@@ -1087,15 +1317,15 @@ export default function TraceCivicPortal() {
                 <Navigation className="w-4 h-4 text-blue-600" />
               </div>
               <p className="text-xs text-slate-600 leading-relaxed">
-                คำนวณการเคลื่อนที่ตามลักษณะภูมิประเทศจริง เลือกโหมดคลิกแผนที่ด้านล่างเพื่อย้ายจุดเริ่มต้น หรือแจ้งจุดที่มีผู้พบเห็นล่าสุด:
+                คำนวณการเคลื่อนที่ตามลักษณะภูมิประเทศจริง คลิกแจ้งจุดพบเห็นบนแผนที่เพื่อบีบวงรัศมีและรับ <strong>+100 Scout XP</strong>:
               </p>
 
               <div className="grid grid-cols-2 gap-2">
                 <button
                   onClick={() => setPetClickMode('MOVE_ORIGIN')}
                   className={`py-2.5 px-2.5 rounded-xl border text-xs font-semibold cursor-pointer transition ${petClickMode === 'MOVE_ORIGIN'
-                    ? 'bg-blue-600 border-blue-600 text-white'
-                    : 'bg-slate-50 border-slate-300 text-slate-700 hover:bg-slate-100'
+                      ? 'bg-blue-600 border-blue-600 text-white'
+                      : 'bg-slate-50 border-slate-300 text-slate-700 hover:bg-slate-100'
                     }`}
                 >
                   คลิกแผนที่ตั้งจุดที่หาย
@@ -1103,11 +1333,11 @@ export default function TraceCivicPortal() {
                 <button
                   onClick={() => setPetClickMode('SIGHTING')}
                   className={`py-2.5 px-2.5 rounded-xl border text-xs font-semibold cursor-pointer transition ${petClickMode === 'SIGHTING'
-                    ? 'bg-amber-500 border-amber-500 text-white'
-                    : 'bg-slate-50 border-slate-300 text-slate-700 hover:bg-slate-100'
+                      ? 'bg-amber-500 border-amber-500 text-white'
+                      : 'bg-slate-50 border-slate-300 text-slate-700 hover:bg-slate-100'
                     }`}
                 >
-                  คลิกแผนที่แจ้งจุดพบเห็น
+                  แจ้งจุดพบเห็น (+100 XP)
                 </button>
               </div>
 
@@ -1125,8 +1355,8 @@ export default function TraceCivicPortal() {
                       key={item.id}
                       onClick={() => setPetProfile(item.id as PetBehaviorProfile)}
                       className={`py-2.5 px-2 text-xs rounded-xl border font-semibold cursor-pointer transition ${petProfile === item.id
-                        ? 'border-blue-600 bg-blue-50 text-blue-700'
-                        : 'border-slate-200 bg-slate-50 text-slate-700 hover:bg-slate-100'
+                          ? 'border-blue-600 bg-blue-50 text-blue-700'
+                          : 'border-slate-200 bg-slate-50 text-slate-700 hover:bg-slate-100'
                         }`}
                     >
                       {item.label}
@@ -1154,8 +1384,8 @@ export default function TraceCivicPortal() {
               <button
                 onClick={() => setIsStorming(!isStorming)}
                 className={`w-full py-2.5 px-3 rounded-xl border text-xs font-semibold flex items-center justify-center gap-2 transition cursor-pointer ${isStorming
-                  ? 'border-blue-600 bg-blue-50 text-blue-700'
-                  : 'border-slate-300 bg-slate-50 text-slate-700 hover:bg-slate-100'
+                    ? 'border-blue-600 bg-blue-50 text-blue-700'
+                    : 'border-slate-300 bg-slate-50 text-slate-700 hover:bg-slate-100'
                   }`}
               >
                 <CloudRain className="w-4 h-4" />
@@ -1180,20 +1410,20 @@ export default function TraceCivicPortal() {
             <div className="bg-white border border-slate-200 rounded-2xl p-5 shadow-xs space-y-4">
               <div className="flex items-center justify-between">
                 <h2 className="text-sm font-bold text-slate-900">
-                  ระบบ AI เบลอข้อมูลสำคัญ & ยืนยันเจ้าของ
+                  โหมดคนเก็บของได้ & ตู้นิรภัยยืนยันเจ้าของ
                 </h2>
                 <ShieldCheck className="w-5 h-5 text-blue-600" />
               </div>
               <p className="text-xs text-slate-600 leading-relaxed">
-                1. อัปโหลดรูปสิ่งของที่พบ<br />
-                2. Gemini AI เบลอตำหนิลับและข้อมูลบัตรโดยอัตโนมัติ<br />
-                3. ตอบคำถามยืนยันตัวตนเพื่อปลดล็อกภาพจริงและจุดนัดรับปลอดภัย
+                1. คนเก็บของได้อัปโหลดรูปสิ่งของ (รับ +150 XP)<br />
+                2. Gemini AI เบลอตำหนิลับและสร้างคำถามท้าทายอัตโนมัติ<br />
+                3. เจ้าของตัวจริงตอบคำถามเพื่อปลดล็อกภาพและจุดนัดรับปลอดภัย
               </p>
 
               <label className="flex flex-col items-center justify-center border-2 border-dashed border-blue-400 hover:border-blue-600 bg-blue-50/40 rounded-2xl p-5 cursor-pointer transition">
                 <Upload className="w-6 h-6 text-blue-600 mb-1.5" />
                 <span className="text-xs text-blue-700 font-bold">
-                  ขั้นตอนที่ 1: อัปโหลดรูปสิ่งของที่พบ (JPG / PNG)
+                  ขั้นตอนที่ 1: อัปโหลดรูปสิ่งของที่พบ (+150 XP)
                 </span>
                 <span className="text-[11px] text-slate-500 mt-0.5">
                   ทดสอบด้วยรูปกระเป๋าสตางค์ บัตร หรือสิ่งของที่มีโลโก้
@@ -1281,8 +1511,8 @@ export default function TraceCivicPortal() {
                   {claimResult && (
                     <div
                       className={`p-4 rounded-xl border space-y-2 ${claimResult.is_verified
-                        ? 'border-emerald-300 bg-emerald-50 text-emerald-950'
-                        : 'border-red-300 bg-red-50 text-red-900'
+                          ? 'border-emerald-300 bg-emerald-50 text-emerald-950'
+                          : 'border-red-300 bg-red-50 text-red-900'
                         }`}
                     >
                       <div className="flex items-center justify-between font-bold">
@@ -1339,8 +1569,8 @@ export default function TraceCivicPortal() {
                 <button
                   onClick={() => setQrMode('LOCKSCREEN')}
                   className={`py-2.5 px-3 rounded-xl border font-semibold cursor-pointer ${qrMode === 'LOCKSCREEN'
-                    ? 'border-blue-600 bg-blue-50 text-blue-700'
-                    : 'border-slate-200 bg-slate-50 text-slate-700'
+                      ? 'border-blue-600 bg-blue-50 text-blue-700'
+                      : 'border-slate-200 bg-slate-50 text-slate-700'
                     }`}
                 >
                   ภาพหน้าจอล็อกมือถือ
@@ -1348,8 +1578,8 @@ export default function TraceCivicPortal() {
                 <button
                   onClick={() => setQrMode('STICKER')}
                   className={`py-2.5 px-3 rounded-xl border font-semibold cursor-pointer ${qrMode === 'STICKER'
-                    ? 'border-blue-600 bg-blue-50 text-blue-700'
-                    : 'border-slate-200 bg-slate-50 text-slate-700'
+                      ? 'border-blue-600 bg-blue-50 text-blue-700'
+                      : 'border-slate-200 bg-slate-50 text-slate-700'
                     }`}
                 >
                   สติกเกอร์ติดสิ่งของ
@@ -1408,18 +1638,18 @@ export default function TraceCivicPortal() {
         </aside>
 
         {/* Right Framed Map & Visual Workbench (8 cols) */}
-        <main className="lg:col-span-8 bg-white border border-slate-200 rounded-2xl shadow-xs overflow-hidden relative min-h-[600px] flex flex-col">
+        <main className="lg:col-span-8 bg-white border border-slate-200 rounded-2xl shadow-xs overflow-hidden relative min-h-[620px] flex flex-col">
           {(activePillar === 'PILLAR_1_IMU' || activePillar === 'PILLAR_2_PET') && (
             <div className="absolute top-4 left-4 right-4 z-10 flex flex-wrap items-center justify-between gap-2 pointer-events-none">
               <div className="bg-white/95 backdrop-blur border border-slate-200 px-3.5 py-2 rounded-xl shadow-sm text-xs text-slate-700 pointer-events-auto">
                 {activePillar === 'PILLAR_1_IMU' ? (
                   isClickToAddNode ? (
                     <span className="text-blue-700 font-bold">
-                      [โหมดปักหมุดทำงานอยู่] คลิกจุดไหนก็ได้บนแผนที่เพื่อเพิ่มพิกัดทำของตก
+                      [โหมดปักหมุดทำงานอยู่] คลิกจุดไหนก็ได้บนแผนที่เพื่อเพิ่มพิกัดทำของตก (+25 XP)
                     </span>
                   ) : (
                     <span>
-                      <strong>คำแนะนำ:</strong> คลิกการ์ดด้านซ้ายเพื่อซูมดูจุดเสี่ยง หรือกดปุ่ม <strong>"ปักหมุดเส้นทางเอง"</strong>
+                      <strong>คำแนะนำ:</strong> คลิกการ์ดด้านซ้ายเพื่อดู Recovery Score หรือกดยืนยันการสำรวจเพื่อสะสมแต้ม XP
                     </span>
                   )
                 ) : (
@@ -1428,7 +1658,7 @@ export default function TraceCivicPortal() {
                     <strong className="text-blue-700">
                       {petClickMode === 'MOVE_ORIGIN'
                         ? 'ตั้งจุดเริ่มต้นที่สัตว์เลี้ยงหาย'
-                        : 'แจ้งจุดที่มีคนพบเห็นสัตว์เลี้ยงล่าสุด'}
+                        : 'แจ้งเบาะแสจุดพบเห็นสัตว์เลี้ยง (+100 XP)'}
                     </strong>
                   </span>
                 )}
@@ -1458,11 +1688,10 @@ export default function TraceCivicPortal() {
             </div>
           )}
 
-          {/* Explicit Height Container so MapLibre GL Always Renders */}
           <div
-            className={`relative w-full h-[620px] ${activePillar === 'PILLAR_1_IMU' || activePillar === 'PILLAR_2_PET'
-              ? 'block'
-              : 'hidden'
+            className={`relative w-full h-[640px] ${activePillar === 'PILLAR_1_IMU' || activePillar === 'PILLAR_2_PET'
+                ? 'block'
+                : 'hidden'
               }`}
           >
             <div
@@ -1487,7 +1716,7 @@ export default function TraceCivicPortal() {
           </div>
 
           {activePillar === 'PILLAR_3_VISION' && (
-            <div className="w-full h-[620px] flex flex-col items-center justify-center p-6 bg-slate-50">
+            <div className="w-full h-[640px] flex flex-col items-center justify-center p-6 bg-slate-50">
               {imageSrc ? (
                 <div className="space-y-3 max-w-full">
                   <div
@@ -1508,7 +1737,7 @@ export default function TraceCivicPortal() {
                   </div>
                   <canvas
                     ref={redactCanvasRef}
-                    className="max-h-[500px] w-auto border border-slate-300 rounded-xl shadow-md bg-white"
+                    className="max-h-[520px] w-auto border border-slate-300 rounded-xl shadow-md bg-white"
                   />
                 </div>
               ) : (
@@ -1518,7 +1747,7 @@ export default function TraceCivicPortal() {
                     ยังไม่มีรูปภาพสิ่งของในหน้าต่างตรวจสอบ
                   </p>
                   <p className="text-slate-600 leading-relaxed">
-                    กดปุ่ม <strong>"อัปโหลดรูปสิ่งของที่พบ"</strong> ด้านซ้ายมือ เพื่อให้ Gemini Vision AI ตรวจจับตำหนิและสร้างกรอบเบลออัตโนมัติ
+                    กดปุ่ม <strong>"ขั้นตอนที่ 1: อัปโหลดรูปสิ่งของที่พบ"</strong> ด้านซ้ายมือ เพื่อให้ Gemini Vision AI ตรวจจับตำหนิและสร้างกรอบเบลออัตโนมัติ
                   </p>
                 </div>
               )}
@@ -1526,10 +1755,10 @@ export default function TraceCivicPortal() {
           )}
 
           {activePillar === 'PILLAR_4_QR' && (
-            <div className="w-full h-[620px] flex flex-col items-center justify-center p-6 bg-slate-50">
+            <div className="w-full h-[640px] flex flex-col items-center justify-center p-6 bg-slate-50">
               <canvas
                 ref={qrCanvasRef}
-                className="max-h-[540px] w-auto border border-slate-300 rounded-2xl shadow-lg"
+                className="max-h-[560px] w-auto border border-slate-300 rounded-2xl shadow-lg"
               />
             </div>
           )}
