@@ -97,14 +97,17 @@ interface SpatialMatchItem {
   distance_meters: number;
 }
 
-// 100% Reliable OpenStreetMap Raster Style (Never renders blank)
+// 100% Reliable OpenStreetMap Raster Style (Zero API key required on any domain)
 const OSM_RASTER_STYLE: maplibregl.StyleSpecification = {
   version: 8,
+  center: [100.5355, 13.7385],
+  zoom: 15.5,
   sources: {
     osm: {
       type: 'raster',
       tiles: ['https://tile.openstreetmap.org/{z}/{x}/{y}.png'],
       tileSize: 256,
+      maxzoom: 19,
       attribution: '© OpenStreetMap contributors',
     },
   },
@@ -113,27 +116,6 @@ const OSM_RASTER_STYLE: maplibregl.StyleSpecification = {
       id: 'osm-Adjust',
       type: 'raster',
       source: 'osm',
-      minzoom: 0,
-      maxzoom: 19,
-    },
-  ],
-};
-
-const CARTO_DARK_RASTER_STYLE: maplibregl.StyleSpecification = {
-  version: 8,
-  sources: {
-    cartoDark: {
-      type: 'raster',
-      tiles: ['https://a.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}.png'],
-      tileSize: 256,
-      attribution: '© OpenStreetMap, © CARTO',
-    },
-  },
-  layers: [
-    {
-      id: 'carto-dark-layer',
-      type: 'raster',
-      source: 'cartoDark',
       minzoom: 0,
       maxzoom: 19,
     },
@@ -199,7 +181,13 @@ export default function TraceCivicPortal() {
     setTrajectorySource('เส้นทางตัวอย่าง: สามย่าน - จุฬาฯ');
     const highest = [...evaluated].sort((a, b) => b.dropProbability - a.dropProbability)[0];
     setSelectedNode(highest || null);
-    mapRef.current?.flyTo({ center: [100.5355, 13.7385], zoom: 15.5 });
+    mapRef.current?.fitBounds(
+      [
+        [100.5322, 13.7358],
+        [100.5392, 13.7422],
+      ],
+      { padding: 65, duration: 500 }
+    );
   }, []);
 
   useEffect(() => {
@@ -240,16 +228,11 @@ export default function TraceCivicPortal() {
     );
   };
 
-  // Switch Map Style (OpenStreetMap Street View vs Dark Radar)
+  // Switch Map Style (OpenStreetMap Street View vs Dark Radar CSS Filter - No CARTO API key required)
   const toggleMapStyle = () => {
-    const nextMode: MapStyleMode =
-      mapStyleMode === 'OSM_STREET' ? 'CARTO_DARK' : 'OSM_STREET';
-    setMapStyleMode(nextMode);
-    if (mapRef.current) {
-      mapRef.current.setStyle(
-        nextMode === 'OSM_STREET' ? OSM_RASTER_STYLE : CARTO_DARK_RASTER_STYLE
-      );
-    }
+    setMapStyleMode((prev) =>
+      prev === 'OSM_STREET' ? 'CARTO_DARK' : 'OSM_STREET'
+    );
   };
 
   // Handle Cold-Start .GPX / .JSON Upload
@@ -511,10 +494,12 @@ export default function TraceCivicPortal() {
     petOrigin,
   ]);
 
-  // Initialize MapLibre Instance with OpenStreetMap Guaranteed Tiles + ResizeObserver
+  // Initialize MapLibre Instance with OpenStreetMap Guaranteed Tiles + Worker URL + ResizeObserver
   useEffect(() => {
     const container = mapContainerRef.current;
     if (!container || mapRef.current) return;
+
+    maplibregl.setWorkerUrl('/maplibre-gl-worker.mjs');
 
     const map = new maplibregl.Map({
       container,
@@ -529,11 +514,20 @@ export default function TraceCivicPortal() {
 
     map.on('load', () => {
       map.resize();
+      map.fitBounds(
+        [
+          [100.5322, 13.7358],
+          [100.5392, 13.7422],
+        ],
+        { padding: 65, duration: 0 }
+      );
+      renderTelemetryCanvas();
     });
 
     // Watch container size so the map never renders blank
     const resizeObserver = new ResizeObserver(() => {
       map.resize();
+      renderTelemetryCanvas();
     });
     resizeObserver.observe(container);
 
@@ -766,772 +760,781 @@ export default function TraceCivicPortal() {
     drawCard();
   }, [activePillar, tagId, bountyAmount, ownerNote, qrMode]);
 
-const downloadQrShield = () => {
-  const canvas = qrCanvasRef.current;
-  if (!canvas) return;
-  const link = document.createElement('a');
-  link.download = `TRACE-${qrMode}-${tagId}.png`;
-  link.href = canvas.toDataURL('image/png');
-  link.click();
-};
+  const downloadQrShield = () => {
+    const canvas = qrCanvasRef.current;
+    if (!canvas) return;
+    const link = document.createElement('a');
+    link.download = `TRACE-${qrMode}-${tagId}.png`;
+    link.href = canvas.toDataURL('image/png');
+    link.click();
+  };
 
-const handleImageUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
-  const file = e.target.files?.[0];
-  if (!file) return;
+  const handleImageUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
 
-  setScanError(null);
-  setForensicData(null);
-  setClaimResult(null);
-  setClaimantAnswer('');
+    setScanError(null);
+    setForensicData(null);
+    setClaimResult(null);
+    setClaimantAnswer('');
 
-  const targetLat = selectedNode?.lat ?? 13.7391;
-  const targetLng = selectedNode?.lng ?? 100.5362;
+    const targetLat = selectedNode?.lat ?? 13.7391;
+    const targetLng = selectedNode?.lng ?? 100.5362;
 
-  const reader = new FileReader();
-  reader.onload = async () => {
-    const base64 = reader.result as string;
-    setImageSrc(base64);
-    setIsScanning(true);
+    const reader = new FileReader();
+    reader.onload = async () => {
+      const base64 = reader.result as string;
+      setImageSrc(base64);
+      setIsScanning(true);
+
+      try {
+        const res = await fetch('/api/verify-item', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            imageBase64: base64,
+            mimeType: file.type || 'image/jpeg',
+            lat: targetLat,
+            lng: targetLng,
+          }),
+        });
+        const data = await res.json();
+        if (!res.ok) throw new Error(data.error || 'Gemini Vision request failed');
+        setForensicData(data);
+      } catch (err: unknown) {
+        setScanError(err instanceof Error ? err.message : 'Error scanning image');
+      } finally {
+        setIsScanning(false);
+      }
+    };
+    reader.readAsDataURL(file);
+  };
+
+  const handleGradeClaim = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!forensicData || !claimantAnswer.trim()) return;
+
+    setIsGrading(true);
+    setScanError(null);
 
     try {
-      const res = await fetch('/api/verify-item', {
+      const res = await fetch('/api/grade-claim', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          imageBase64: base64,
-          mimeType: file.type || 'image/jpeg',
-          lat: targetLat,
-          lng: targetLng,
+          claimantAnswer: claimantAnswer.trim(),
+          secretDetail: forensicData.challenge_prompt.dev_preview_secret,
+          keywordsEn: forensicData.challenge_prompt.dev_preview_keywords_en || [],
+          keywordsTh: forensicData.challenge_prompt.dev_preview_keywords_th || [],
         }),
       });
       const data = await res.json();
-      if (!res.ok) throw new Error(data.error || 'Gemini Vision request failed');
-      setForensicData(data);
+      if (!res.ok) throw new Error(data.error || 'Failed to grade ownership claim');
+      setClaimResult(data);
     } catch (err: unknown) {
-      setScanError(err instanceof Error ? err.message : 'Error scanning image');
+      setScanError(err instanceof Error ? err.message : 'Error grading claim');
     } finally {
-      setIsScanning(false);
+      setIsGrading(false);
     }
   };
-  reader.readAsDataURL(file);
-};
 
-const handleGradeClaim = async (e: React.FormEvent) => {
-  e.preventDefault();
-  if (!forensicData || !claimantAnswer.trim()) return;
+  const steps: Array<{ id: ActivePillar; stepNum: string; title: string; subtitle: string }> = [
+    {
+      id: 'PILLAR_1_IMU',
+      stepNum: '1',
+      title: '1. วิเคราะห์จุดทำของตก',
+      subtitle: 'IMU Drop Trajectory',
+    },
+    {
+      id: 'PILLAR_2_PET',
+      stepNum: '2',
+      title: '2. จำลองรัศมีสัตว์เลี้ยงหาย',
+      subtitle: 'Pet Cellular Automata',
+    },
+    {
+      id: 'PILLAR_3_VISION',
+      stepNum: '3',
+      title: '3. แจ้งเจอของ & ยืนยันเจ้าของ',
+      subtitle: 'Gemini AI Claim Vault',
+    },
+    {
+      id: 'PILLAR_4_QR',
+      stepNum: '4',
+      title: '4. สร้าง QR ป้องกันของหาย',
+      subtitle: 'Samaritan Shield Tag',
+    },
+  ];
 
-  setIsGrading(true);
-  setScanError(null);
-
-  try {
-    const res = await fetch('/api/grade-claim', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        claimantAnswer: claimantAnswer.trim(),
-        secretDetail: forensicData.challenge_prompt.dev_preview_secret,
-        keywordsEn: forensicData.challenge_prompt.dev_preview_keywords_en || [],
-        keywordsTh: forensicData.challenge_prompt.dev_preview_keywords_th || [],
-      }),
-    });
-    const data = await res.json();
-    if (!res.ok) throw new Error(data.error || 'Failed to grade ownership claim');
-    setClaimResult(data);
-  } catch (err: unknown) {
-    setScanError(err instanceof Error ? err.message : 'Error grading claim');
-  } finally {
-    setIsGrading(false);
-  }
-};
-
-const steps: Array<{ id: ActivePillar; stepNum: string; title: string; subtitle: string }> = [
-  {
-    id: 'PILLAR_1_IMU',
-    stepNum: '1',
-    title: '1. วิเคราะห์จุดทำของตก',
-    subtitle: 'IMU Drop Trajectory',
-  },
-  {
-    id: 'PILLAR_2_PET',
-    stepNum: '2',
-    title: '2. จำลองรัศมีสัตว์เลี้ยงหาย',
-    subtitle: 'Pet Cellular Automata',
-  },
-  {
-    id: 'PILLAR_3_VISION',
-    stepNum: '3',
-    title: '3. แจ้งเจอของ & ยืนยันเจ้าของ',
-    subtitle: 'Gemini AI Claim Vault',
-  },
-  {
-    id: 'PILLAR_4_QR',
-    stepNum: '4',
-    title: '4. สร้าง QR ป้องกันของหาย',
-    subtitle: 'Samaritan Shield Tag',
-  },
-];
-
-return (
-  <div className="min-h-screen bg-[#F8FAFC] text-slate-900 font-sans flex flex-col">
-    {/* Top Civic-Tech Trust Header */}
-    <header className="bg-white border-b border-slate-200 px-6 py-3.5 shadow-xs">
-      <div className="max-w-[1440px] mx-auto flex flex-wrap items-center justify-between gap-4">
-        <div className="flex items-center gap-3">
-          <div className="w-10 h-10 rounded-xl bg-blue-600 flex items-center justify-center text-white shadow-xs">
-            <Radar className="w-6 h-6" />
-          </div>
-          <div>
-            <div className="flex items-center gap-2.5">
-              <h1 className="text-lg font-bold tracking-tight text-slate-900">
-                TRACE // ระบบโครงข่ายพิกัดกู้คืนของหายและสัตว์เลี้ยงอัจฉริยะ
-              </h1>
-              <span className="hidden sm:inline-flex items-center gap-1 px-2.5 py-0.5 rounded-full text-xs font-semibold bg-blue-50 text-blue-700 border border-blue-200">
-                <ShieldCheck className="w-3.5 h-3.5 text-blue-600" />
-                Verified PostGIS & Gemini AI
-              </span>
+  return (
+    <div className="min-h-screen bg-[#F8FAFC] text-slate-900 font-sans flex flex-col">
+      {/* Top Civic-Tech Trust Header */}
+      <header className="bg-white border-b border-slate-200 px-6 py-3.5 shadow-xs">
+        <div className="max-w-[1440px] mx-auto flex flex-wrap items-center justify-between gap-4">
+          <div className="flex items-center gap-3">
+            <div className="w-10 h-10 rounded-xl bg-blue-600 flex items-center justify-center text-white shadow-xs">
+              <Radar className="w-6 h-6" />
             </div>
-            <p className="text-xs text-slate-500 mt-0.5">
-              สถานะข้อมูล: {trajectorySource} • พิกัดภูมิสารสนเทศ SRID 4326 พร้อมใช้งาน
-            </p>
+            <div>
+              <div className="flex items-center gap-2.5">
+                <h1 className="text-lg font-bold tracking-tight text-slate-900">
+                  TRACE // ระบบโครงข่ายพิกัดกู้คืนของหายและสัตว์เลี้ยงอัจฉริยะ
+                </h1>
+                <span className="hidden sm:inline-flex items-center gap-1 px-2.5 py-0.5 rounded-full text-xs font-semibold bg-blue-50 text-blue-700 border border-blue-200">
+                  <ShieldCheck className="w-3.5 h-3.5 text-blue-600" />
+                  Verified PostGIS & Gemini AI
+                </span>
+              </div>
+              <p className="text-xs text-slate-500 mt-0.5">
+                สถานะข้อมูล: {trajectorySource} • พิกัดภูมิสารสนเทศ SRID 4326 พร้อมใช้งาน
+              </p>
+            </div>
+          </div>
+
+          <div className="flex items-center gap-2">
+            <button
+              onClick={() => setActivePillar('PILLAR_3_VISION')}
+              className="px-4 py-2 rounded-lg bg-blue-600 hover:bg-blue-700 text-white text-xs font-semibold shadow-xs transition cursor-pointer"
+            >
+              แจ้งพบสิ่งของ / ยืนยันสิทธิ์รับคืน
+            </button>
           </div>
         </div>
+      </header>
 
-        <div className="flex items-center gap-2">
-          <button
-            onClick={() => setActivePillar('PILLAR_3_VISION')}
-            className="px-4 py-2 rounded-lg bg-blue-600 hover:bg-blue-700 text-white text-xs font-semibold shadow-xs transition cursor-pointer"
-          >
-            แจ้งพบสิ่งของ / ยืนยันสิทธิ์รับคืน
-          </button>
-        </div>
-      </div>
-    </header>
-
-    {/* Civic Step-by-Step Progress Bar */}
-    <div className="bg-white border-b border-slate-200 px-6 py-3">
-      <div className="max-w-[1440px] mx-auto grid grid-cols-2 lg:grid-cols-4 gap-3">
-        {steps.map((st) => {
-          const isActive = activePillar === st.id;
-          return (
-            <button
-              key={st.id}
-              onClick={() => setActivePillar(st.id)}
-              className={`flex items-center gap-3 p-2.5 rounded-xl border text-left transition cursor-pointer ${isActive
+      {/* Civic Step-by-Step Progress Bar */}
+      <div className="bg-white border-b border-slate-200 px-6 py-3">
+        <div className="max-w-[1440px] mx-auto grid grid-cols-2 lg:grid-cols-4 gap-3">
+          {steps.map((st) => {
+            const isActive = activePillar === st.id;
+            return (
+              <button
+                key={st.id}
+                onClick={() => setActivePillar(st.id)}
+                className={`flex items-center gap-3 p-2.5 rounded-xl border text-left transition cursor-pointer ${isActive
                   ? 'bg-amber-50/90 border-amber-300 shadow-xs'
                   : 'bg-slate-50 hover:bg-slate-100 border-slate-200'
-                }`}
-            >
-              <div
-                className={`w-7 h-7 rounded-full flex items-center justify-center text-xs font-bold shrink-0 ${isActive
-                    ? 'bg-blue-600 text-white'
-                    : 'bg-slate-200 text-slate-700'
                   }`}
               >
-                <Check className="w-3.5 h-3.5" />
-              </div>
-              <div className="overflow-hidden">
                 <div
-                  className={`text-xs font-bold truncate ${isActive ? 'text-slate-900' : 'text-slate-700'
+                  className={`w-7 h-7 rounded-full flex items-center justify-center text-xs font-bold shrink-0 ${isActive
+                    ? 'bg-blue-600 text-white'
+                    : 'bg-slate-200 text-slate-700'
                     }`}
                 >
-                  {st.title}
+                  <Check className="w-3.5 h-3.5" />
                 </div>
-                <div className="text-[11px] text-slate-500 truncate">{st.subtitle}</div>
-              </div>
-            </button>
-          );
-        })}
+                <div className="overflow-hidden">
+                  <div
+                    className={`text-xs font-bold truncate ${isActive ? 'text-slate-900' : 'text-slate-700'
+                      }`}
+                  >
+                    {st.title}
+                  </div>
+                  <div className="text-[11px] text-slate-500 truncate">{st.subtitle}</div>
+                </div>
+              </button>
+            );
+          })}
+        </div>
       </div>
-    </div>
 
-    {/* Main Two-Column Civic Workbench */}
-    <div className="flex-1 max-w-[1440px] w-full mx-auto p-4 md:p-6 grid grid-cols-1 lg:grid-cols-12 gap-6">
-      {/* Left Control Column (4 cols) */}
-      <aside className="lg:col-span-4 space-y-4">
-        {activePillar === 'PILLAR_1_IMU' && (
-          <>
-            <div className="bg-white border border-slate-200 rounded-2xl p-5 shadow-xs space-y-3.5">
-              <div className="flex items-center justify-between">
-                <h2 className="text-sm font-bold text-slate-900">
-                  วิเคราะห์เส้นทางและจุดเสี่ยงทำของตก
-                </h2>
-                <Cpu className="w-4 h-4 text-blue-600" />
-              </div>
-              <p className="text-xs text-slate-600 leading-relaxed">
-                คำนวณความน่าจะเป็นของจุดที่ทำของตก (<code className="text-blue-700 font-semibold">P_drop</code>) จากการหยุดนิ่งชั่วขณะ แรงกระตุกเซนเซอร์ และการเปลี่ยนยานพาหนะ
-              </p>
+      {/* Main Two-Column Civic Workbench */}
+      <div className="flex-1 max-w-[1440px] w-full mx-auto p-4 md:p-6 grid grid-cols-1 lg:grid-cols-12 gap-6">
+        {/* Left Control Column (4 cols) */}
+        <aside className="lg:col-span-4 space-y-4">
+          {activePillar === 'PILLAR_1_IMU' && (
+            <>
+              <div className="bg-white border border-slate-200 rounded-2xl p-5 shadow-xs space-y-3.5">
+                <div className="flex items-center justify-between">
+                  <h2 className="text-sm font-bold text-slate-900">
+                    วิเคราะห์เส้นทางและจุดเสี่ยงทำของตก
+                  </h2>
+                  <Cpu className="w-4 h-4 text-blue-600" />
+                </div>
+                <p className="text-xs text-slate-600 leading-relaxed">
+                  คำนวณความน่าจะเป็นของจุดที่ทำของตก (<code className="text-blue-700 font-semibold">P_drop</code>) จากการหยุดนิ่งชั่วขณะ แรงกระตุกเซนเซอร์ และการเปลี่ยนยานพาหนะ
+                </p>
 
-              <div className="grid grid-cols-2 gap-2">
-                <button
-                  onClick={() => setIsClickToAddNode(!isClickToAddNode)}
-                  className={`py-2.5 px-3 rounded-xl border text-xs font-semibold flex items-center justify-center gap-1.5 transition cursor-pointer ${isClickToAddNode
+                <div className="grid grid-cols-2 gap-2">
+                  <button
+                    onClick={() => setIsClickToAddNode(!isClickToAddNode)}
+                    className={`py-2.5 px-3 rounded-xl border text-xs font-semibold flex items-center justify-center gap-1.5 transition cursor-pointer ${isClickToAddNode
                       ? 'bg-blue-600 border-blue-600 text-white shadow-xs'
                       : 'bg-slate-50 hover:bg-slate-100 border-slate-300 text-slate-800'
-                    }`}
-                >
-                  <MousePointerClick className="w-4 h-4" />
-                  <span>{isClickToAddNode ? 'คลิกบนแผนที่ได้เลย...' : 'ปักหมุดเส้นทางเอง'}</span>
-                </button>
-
-                <button
-                  onClick={resetDemoTrajectory}
-                  className="py-2.5 px-3 rounded-xl border border-slate-300 bg-slate-50 hover:bg-slate-100 text-slate-700 text-xs font-semibold flex items-center justify-center gap-1.5 transition cursor-pointer"
-                >
-                  <RotateCcw className="w-3.5 h-3.5" />
-                  <span>รีเซ็ตเส้นทางตัวอย่าง</span>
-                </button>
-              </div>
-
-              <div className="grid grid-cols-2 gap-2">
-                <label className="flex items-center justify-center gap-1.5 py-2.5 px-3 rounded-xl border border-slate-300 bg-white hover:bg-slate-50 text-slate-800 text-xs font-semibold cursor-pointer transition">
-                  <FileUp className="w-4 h-4 text-blue-600" />
-                  <span>อัปโหลด .GPX / .JSON</span>
-                  <input
-                    type="file"
-                    accept=".gpx,.json,.xml"
-                    onChange={handleTrajectoryUpload}
-                    className="hidden"
-                  />
-                </label>
-
-                <button
-                  onClick={toggleLiveImuRecording}
-                  className={`flex items-center justify-center gap-1.5 py-2.5 px-3 rounded-xl border text-xs font-semibold transition cursor-pointer ${isRecordingImu ? 'border-red-600 bg-red-50 text-red-700 animate-pulse' : 'border-amber-300 bg-amber-50 hover:bg-amber-100 text-amber-900'}`} > <Activity className="w-4 h-4" /> <span>{isRecordingImu ? 'กำลังบันทึกเซนเซอร์...' : 'บันทึกเซนเซอร์มือถือสด'}</span> </button> </div>  <button onClick={runSpatialIntersectionRadar} disabled={isCheckingRadar} className="w-full py-2.5 px-4 rounded-xl bg-blue-600 hover:bg-blue-700 text-white text-xs font-semibold flex items-center justify-center gap-2 shadow-xs transition cursor-pointer" > <Radio className={`w-4 h-4 ${isCheckingRadar ? 'animate-spin' : ''}`} />
-                <span>
-                  {isCheckingRadar
-                    ? 'กำลังค้นหาในฐานข้อมูล PostGIS...'
-                    : 'สแกนหาสิ่งของที่พบใกล้จุดเสี่ยง (<30 เมตร)'}
-                </span>
-              </button>
-            </div>
-
-            {spatialMatches.length > 0 && (
-              <div className="bg-emerald-50 border border-emerald-300 rounded-2xl p-4 space-y-2.5 text-xs shadow-xs">
-                <div className="text-emerald-800 font-bold flex items-center gap-1.5">
-                  <CheckCircle2 className="w-4 h-4 text-emerald-600" />
-                  <span>พบสิ่งของในระบบตรงกับเส้นทางของคุณ ({spatialMatches.length} รายการ)</span>
-                </div>
-                {spatialMatches.map((m) => (
-                  <div
-                    key={m.vaultItemId}
-                    className="p-3 bg-white rounded-xl border border-emerald-200 space-y-1"
+                      }`}
                   >
-                    <div className="flex justify-between font-bold text-slate-900">
-                      <span>{m.category} (ใกล้จุด {m.nodeId})</span>
-                      <span className="text-emerald-700">ห่าง {m.distance_meters} ม.</span>
-                    </div>
-                    <p className="text-xs text-slate-600">{m.public_summary}</p>
-                    <button
-                      onClick={() => setActivePillar('PILLAR_3_VISION')}
-                      className="text-xs text-blue-600 hover:underline font-bold pt-1 cursor-pointer"
-                    >
-                      ไปยังหน้ายืนยันความเป็นเจ้าของเพื่อรับคืน
-                    </button>
-                  </div>
-                ))}
-              </div>
-            )}
+                    <MousePointerClick className="w-4 h-4" />
+                    <span>{isClickToAddNode ? 'คลิกบนแผนที่ได้เลย...' : 'ปักหมุดเส้นทางเอง'}</span>
+                  </button>
 
-            <div className="bg-white border border-slate-200 rounded-2xl p-5 shadow-xs space-y-3">
-              <h3 className="text-xs font-bold uppercase tracking-wider text-slate-500">
-                รายการจุดพิกัดตามเส้นทาง ({scoredNodes.length} จุด)
-              </h3>
-              <div className="space-y-2.5 max-h-[340px] overflow-y-auto pr-1">
-                {scoredNodes.map((node) => {
-                  const isSelected = selectedNode?.id === node.id;
-                  const isHigh = node.dropProbability > 0.7;
-                  const isMed = node.dropProbability > 0.45;
-                  return (
+                  <button
+                    onClick={resetDemoTrajectory}
+                    className="py-2.5 px-3 rounded-xl border border-slate-300 bg-slate-50 hover:bg-slate-100 text-slate-700 text-xs font-semibold flex items-center justify-center gap-1.5 transition cursor-pointer"
+                  >
+                    <RotateCcw className="w-3.5 h-3.5" />
+                    <span>รีเซ็ตเส้นทางตัวอย่าง</span>
+                  </button>
+                </div>
+
+                <div className="grid grid-cols-2 gap-2">
+                  <label className="flex items-center justify-center gap-1.5 py-2.5 px-3 rounded-xl border border-slate-300 bg-white hover:bg-slate-50 text-slate-800 text-xs font-semibold cursor-pointer transition">
+                    <FileUp className="w-4 h-4 text-blue-600" />
+                    <span>อัปโหลด .GPX / .JSON</span>
+                    <input
+                      type="file"
+                      accept=".gpx,.json,.xml"
+                      onChange={handleTrajectoryUpload}
+                      className="hidden"
+                    />
+                  </label>
+
+                  <button
+                    onClick={toggleLiveImuRecording}
+                    className={`flex items-center justify-center gap-1.5 py-2.5 px-3 rounded-xl border text-xs font-semibold transition cursor-pointer ${isRecordingImu ? 'border-red-600 bg-red-50 text-red-700 animate-pulse' : 'border-amber-300 bg-amber-50 hover:bg-amber-100 text-amber-900'}`} > <Activity className="w-4 h-4" /> <span>{isRecordingImu ? 'กำลังบันทึกเซนเซอร์...' : 'บันทึกเซนเซอร์มือถือสด'}</span> </button> </div>  <button onClick={runSpatialIntersectionRadar} disabled={isCheckingRadar} className="w-full py-2.5 px-4 rounded-xl bg-blue-600 hover:bg-blue-700 text-white text-xs font-semibold flex items-center justify-center gap-2 shadow-xs transition cursor-pointer" > <Radio className={`w-4 h-4 ${isCheckingRadar ? 'animate-spin' : ''}`} />
+                  <span>
+                    {isCheckingRadar
+                      ? 'กำลังค้นหาในฐานข้อมูล PostGIS...'
+                      : 'สแกนหาสิ่งของที่พบใกล้จุดเสี่ยง (<30 เมตร)'}
+                  </span>
+                </button>
+              </div>
+
+              {spatialMatches.length > 0 && (
+                <div className="bg-emerald-50 border border-emerald-300 rounded-2xl p-4 space-y-2.5 text-xs shadow-xs">
+                  <div className="text-emerald-800 font-bold flex items-center gap-1.5">
+                    <CheckCircle2 className="w-4 h-4 text-emerald-600" />
+                    <span>พบสิ่งของในระบบตรงกับเส้นทางของคุณ ({spatialMatches.length} รายการ)</span>
+                  </div>
+                  {spatialMatches.map((m) => (
                     <div
-                      key={node.id}
-                      onClick={() => {
-                        setSelectedNode(node);
-                        mapRef.current?.flyTo({ center: [node.lng, node.lat], zoom: 16.5 });
-                      }}
-                      className={`p-3.5 rounded-xl border cursor-pointer transition ${isSelected
+                      key={m.vaultItemId}
+                      className="p-3 bg-white rounded-xl border border-emerald-200 space-y-1"
+                    >
+                      <div className="flex justify-between font-bold text-slate-900">
+                        <span>{m.category} (ใกล้จุด {m.nodeId})</span>
+                        <span className="text-emerald-700">ห่าง {m.distance_meters} ม.</span>
+                      </div>
+                      <p className="text-xs text-slate-600">{m.public_summary}</p>
+                      <button
+                        onClick={() => setActivePillar('PILLAR_3_VISION')}
+                        className="text-xs text-blue-600 hover:underline font-bold pt-1 cursor-pointer"
+                      >
+                        ไปยังหน้ายืนยันความเป็นเจ้าของเพื่อรับคืน
+                      </button>
+                    </div>
+                  ))}
+                </div>
+              )}
+
+              <div className="bg-white border border-slate-200 rounded-2xl p-5 shadow-xs space-y-3">
+                <h3 className="text-xs font-bold uppercase tracking-wider text-slate-500">
+                  รายการจุดพิกัดตามเส้นทาง ({scoredNodes.length} จุด)
+                </h3>
+                <div className="space-y-2.5 max-h-[340px] overflow-y-auto pr-1">
+                  {scoredNodes.map((node) => {
+                    const isSelected = selectedNode?.id === node.id;
+                    const isHigh = node.dropProbability > 0.7;
+                    const isMed = node.dropProbability > 0.45;
+                    return (
+                      <div
+                        key={node.id}
+                        onClick={() => {
+                          setSelectedNode(node);
+                          mapRef.current?.flyTo({ center: [node.lng, node.lat], zoom: 16.5 });
+                        }}
+                        className={`p-3.5 rounded-xl border cursor-pointer transition ${isSelected
                           ? 'border-blue-600 bg-blue-50/50 shadow-xs'
                           : 'border-slate-200 bg-slate-50/60 hover:bg-slate-100'
-                        }`}
-                    >
-                      <div className="flex items-center justify-between">
-                        <span className="text-xs font-bold text-slate-900">
-                          จุดพิกัด {node.id}
-                        </span>
-                        <span
-                          className={`text-xs font-bold px-2.5 py-0.5 rounded-full ${isHigh
+                          }`}
+                      >
+                        <div className="flex items-center justify-between">
+                          <span className="text-xs font-bold text-slate-900">
+                            จุดพิกัด {node.id}
+                          </span>
+                          <span
+                            className={`text-xs font-bold px-2.5 py-0.5 rounded-full ${isHigh
                               ? 'bg-red-100 text-red-800 border border-red-200'
                               : isMed
                                 ? 'bg-amber-100 text-amber-800 border border-amber-200'
                                 : 'bg-slate-200 text-slate-700'
-                            }`}
-                        >
-                          โอกาสตก {(node.dropProbability * 100).toFixed(1)}%
-                        </span>
+                              }`}
+                          >
+                            โอกาสตก {(node.dropProbability * 100).toFixed(1)}%
+                          </span>
+                        </div>
+                        <p className="text-xs font-medium text-blue-700 mt-1">
+                          สาเหตุ: {node.anomalyReason}
+                        </p>
+                        <div className="grid grid-cols-3 gap-2 mt-2 text-[11px] text-slate-500">
+                          <div>หยุดนิ่ง: {node.dwellScore}</div>
+                          <div>แรงกระตุก: {node.jerkScore}</div>
+                          <div>เปลี่ยนพาหนะ: {node.transitScore}</div>
+                        </div>
                       </div>
-                      <p className="text-xs font-medium text-blue-700 mt-1">
-                        สาเหตุ: {node.anomalyReason}
-                      </p>
-                      <div className="grid grid-cols-3 gap-2 mt-2 text-[11px] text-slate-500">
-                        <div>หยุดนิ่ง: {node.dwellScore}</div>
-                        <div>แรงกระตุก: {node.jerkScore}</div>
-                        <div>เปลี่ยนพาหนะ: {node.transitScore}</div>
-                      </div>
-                    </div>
-                  );
-                })}
+                    );
+                  })}
+                </div>
               </div>
-            </div>
-          </>
-        )}
+            </>
+          )}
 
-        {activePillar === 'PILLAR_2_PET' && (
-          <div className="bg-white border border-slate-200 rounded-2xl p-5 shadow-xs space-y-4">
-            <div className="flex items-center justify-between">
-              <h2 className="text-sm font-bold text-slate-900">
-                จำลองรัศมีสัตว์เลี้ยงหาย (Cellular Automata)
-              </h2>
-              <Navigation className="w-4 h-4 text-blue-600" />
-            </div>
-            <p className="text-xs text-slate-600 leading-relaxed">
-              คำนวณการเคลื่อนที่ตามลักษณะภูมิประเทศจริง เลือกโหมดคลิกแผนที่ด้านล่างเพื่อย้ายจุดเริ่มต้น หรือแจ้งจุดที่มีผู้พบเห็นล่าสุด:
-            </p>
+          {activePillar === 'PILLAR_2_PET' && (
+            <div className="bg-white border border-slate-200 rounded-2xl p-5 shadow-xs space-y-4">
+              <div className="flex items-center justify-between">
+                <h2 className="text-sm font-bold text-slate-900">
+                  จำลองรัศมีสัตว์เลี้ยงหาย (Cellular Automata)
+                </h2>
+                <Navigation className="w-4 h-4 text-blue-600" />
+              </div>
+              <p className="text-xs text-slate-600 leading-relaxed">
+                คำนวณการเคลื่อนที่ตามลักษณะภูมิประเทศจริง เลือกโหมดคลิกแผนที่ด้านล่างเพื่อย้ายจุดเริ่มต้น หรือแจ้งจุดที่มีผู้พบเห็นล่าสุด:
+              </p>
 
-            <div className="grid grid-cols-2 gap-2">
-              <button
-                onClick={() => setPetClickMode('MOVE_ORIGIN')}
-                className={`py-2.5 px-2.5 rounded-xl border text-xs font-semibold cursor-pointer transition ${petClickMode === 'MOVE_ORIGIN'
+              <div className="grid grid-cols-2 gap-2">
+                <button
+                  onClick={() => setPetClickMode('MOVE_ORIGIN')}
+                  className={`py-2.5 px-2.5 rounded-xl border text-xs font-semibold cursor-pointer transition ${petClickMode === 'MOVE_ORIGIN'
                     ? 'bg-blue-600 border-blue-600 text-white'
                     : 'bg-slate-50 border-slate-300 text-slate-700 hover:bg-slate-100'
-                  }`}
-              >
-                คลิกแผนที่ตั้งจุดที่หาย
-              </button>
-              <button
-                onClick={() => setPetClickMode('SIGHTING')}
-                className={`py-2.5 px-2.5 rounded-xl border text-xs font-semibold cursor-pointer transition ${petClickMode === 'SIGHTING'
-                    ? 'bg-amber-500 border-amber-500 text-white'
-                    : 'bg-slate-50 border-slate-300 text-slate-700 hover:bg-slate-100'
-                  }`}
-              >
-                คลิกแผนที่แจ้งจุดพบเห็น
-              </button>
-            </div>
-
-            <div className="space-y-2">
-              <label className="text-xs font-bold text-slate-700 block">
-                เลือกโปรไฟล์พฤติกรรมสัตว์เลี้ยง
-              </label>
-              <div className="grid grid-cols-3 gap-2">
-                {[
-                  { id: 'SHY_CAT', label: 'แมวขี้กลัว (ซ่อนตัว)' },
-                  { id: 'SPOOKED_DOG', label: 'สุนัขตื่นตกใจ (วิ่งเร็ว)' },
-                  { id: 'CURIOUS_DOG', label: 'สุนัขเชื่อง (เดินตามซอย)' },
-                ].map((item) => (
-                  <button
-                    key={item.id}
-                    onClick={() => setPetProfile(item.id as PetBehaviorProfile)}
-                    className={`py-2.5 px-2 text-xs rounded-xl border font-semibold cursor-pointer transition ${petProfile === item.id
-                        ? 'border-blue-600 bg-blue-50 text-blue-700'
-                        : 'border-slate-200 bg-slate-50 text-slate-700 hover:bg-slate-100'
-                      }`}
-                  >
-                    {item.label}
-                  </button>
-                ))}
-              </div>
-            </div>
-
-            <div className="space-y-1.5">
-              <div className="flex justify-between text-xs font-bold">
-                <span className="text-slate-700">เวลาที่ผ่านไปหลังหลุดหาย</span>
-                <span className="text-blue-600">{elapsedMinutes} นาที</span>
-              </div>
-              <input
-                type="range"
-                min={10}
-                max={140}
-                step={5}
-                value={elapsedMinutes}
-                onChange={(e) => setElapsedMinutes(Number(e.target.value))}
-                className="w-full accent-blue-600"
-              />
-            </div>
-
-            <button
-              onClick={() => setIsStorming(!isStorming)}
-              className={`w-full py-2.5 px-3 rounded-xl border text-xs font-semibold flex items-center justify-center gap-2 transition cursor-pointer ${isStorming
-                  ? 'border-blue-600 bg-blue-50 text-blue-700'
-                  : 'border-slate-300 bg-slate-50 text-slate-700 hover:bg-slate-100'
-                }`}
-            >
-              <CloudRain className="w-4 h-4" />
-              {isStorming
-                ? 'โหมดฝนตก/ฟ้าร้อง: เปิดใช้งาน (หาที่หลบฝน 2 เท่า)'
-                : 'จำลองสภาพอากาศฝนตก / ฟ้าร้อง'}
-            </button>
-
-            {sightingCoord && (
-              <button
-                onClick={() => setSightingCoord(null)}
-                className="w-full py-2.5 rounded-xl border border-red-300 bg-red-50 text-red-700 text-xs font-semibold flex items-center justify-center gap-2 cursor-pointer"
-              >
-                <Crosshair className="w-4 h-4" />
-                รีเซ็ตกลับไปยังจุดเริ่มต้นที่สัตว์เลี้ยงหาย
-              </button>
-            )}
-          </div>
-        )}
-
-        {activePillar === 'PILLAR_3_VISION' && (
-          <div className="bg-white border border-slate-200 rounded-2xl p-5 shadow-xs space-y-4">
-            <div className="flex items-center justify-between">
-              <h2 className="text-sm font-bold text-slate-900">
-                ระบบ AI เบลอข้อมูลสำคัญ & ยืนยันเจ้าของ
-              </h2>
-              <ShieldCheck className="w-5 h-5 text-blue-600" />
-            </div>
-            <p className="text-xs text-slate-600 leading-relaxed">
-              1. อัปโหลดรูปสิ่งของที่พบ<br />
-              2. Gemini AI เบลอตำหนิลับและข้อมูลบัตรโดยอัตโนมัติ<br />
-              3. ตอบคำถามยืนยันตัวตนเพื่อปลดล็อกภาพจริงและจุดนัดรับปลอดภัย
-            </p>
-
-            <label className="flex flex-col items-center justify-center border-2 border-dashed border-blue-400 hover:border-blue-600 bg-blue-50/40 rounded-2xl p-5 cursor-pointer transition">
-              <Upload className="w-6 h-6 text-blue-600 mb-1.5" />
-              <span className="text-xs text-blue-700 font-bold">
-                ขั้นตอนที่ 1: อัปโหลดรูปสิ่งของที่พบ (JPG / PNG)
-              </span>
-              <span className="text-[11px] text-slate-500 mt-0.5">
-                ทดสอบด้วยรูปกระเป๋าสตางค์ บัตร หรือสิ่งของที่มีโลโก้
-              </span>
-              <input type="file" accept="image/*" onChange={handleImageUpload} className="hidden" />
-            </label>
-
-            {isScanning && (
-              <div className="p-3.5 border border-blue-200 bg-blue-50 rounded-xl text-xs text-blue-800 flex items-center gap-3 font-medium">
-                <Sparkles className="w-4 h-4 animate-spin shrink-0 text-blue-600" />
-                <span>Gemini AI กำลังแยกตำหนิลับและเบลอข้อมูลสำคัญ...</span>
-              </div>
-            )}
-
-            {scanError && (
-              <div className="p-3 border border-red-300 bg-red-50 rounded-xl text-xs text-red-700">
-                เกิดข้อผิดพลาด: {scanError}
-              </div>
-            )}
-
-            {forensicData && (
-              <div className="space-y-3.5 text-xs">
-                <div className="p-3.5 border border-emerald-200 bg-emerald-50/70 rounded-xl space-y-1">
-                  <div className="flex items-center gap-1.5 text-emerald-800 font-bold mb-1">
-                    <CheckCircle2 className="w-4 h-4 text-emerald-600" />
-                    <span>ข้อมูลทั่วไปที่แสดงต่อสาธารณะ (Public Macro Tags)</span>
-                  </div>
-                  <p><strong>หมวดหมู่:</strong> {forensicData.public_payload.category}</p>
-                  <p><strong>สี:</strong> {forensicData.public_payload.color}</p>
-                  <p><strong>แบรนด์:</strong> {forensicData.public_payload.brand}</p>
-                  <p className="mt-1 text-slate-700">{forensicData.public_payload.public_summary}</p>
-                </div>
-
-                <form
-                  onSubmit={handleGradeClaim}
-                  className="p-4 border border-amber-300 bg-amber-50/50 rounded-xl space-y-3"
-                >
-                  <div className="flex items-center justify-between text-amber-900 font-bold">
-                    <div className="flex items-center gap-1.5">
-                      <Lock className="w-4 h-4 text-amber-700" />
-                      <span>ขั้นตอนที่ 2: ตอบคำถามยืนยันความเป็นเจ้าของ</span>
-                    </div>
-                    <button
-                      type="button"
-                      onClick={() => setShowDevSpoilers(!showDevSpoilers)}
-                      className="text-[11px] text-blue-600 hover:underline flex items-center gap-1 cursor-pointer"
-                    >
-                      <Eye className="w-3 h-3" />
-                      {showDevSpoilers ? 'ซ่อนเฉลย' : 'ดูเฉลย (สำหรับกรรมการ)'}
-                    </button>
-                  </div>
-
-                  <div className="space-y-1.5 text-slate-800 bg-white p-3 rounded-lg border border-amber-200">
-                    <p><strong>คำถาม (TH):</strong> {forensicData.challenge_prompt.th}</p>
-                    <p className="text-slate-500"><strong>EN:</strong> {forensicData.challenge_prompt.en}</p>
-                  </div>
-
-                  {showDevSpoilers && (
-                    <div className="p-2.5 bg-white border border-slate-200 rounded-lg text-[11px] text-slate-600 space-y-1">
-                      <p><strong>ความลับที่ถูกเบลอไว้:</strong> {forensicData.challenge_prompt.dev_preview_secret}</p>
-                      <p><strong>คำสำคัญ (TH):</strong> {forensicData.challenge_prompt.dev_preview_keywords_th?.join(', ')}</p>
-                      <p><strong>คำสำคัญ (EN):</strong> {forensicData.challenge_prompt.dev_preview_keywords_en?.join(', ')}</p>
-                    </div>
-                  )}
-
-                  <div className="space-y-2">
-                    <input
-                      type="text"
-                      value={claimantAnswer}
-                      onChange={(e) => setClaimantAnswer(e.target.value)}
-                      placeholder="พิมพ์คำตอบภาษาไทย หรือ ภาษาอังกฤษ..."
-                      className="w-full bg-white border border-slate-300 focus:border-blue-600 rounded-lg px-3 py-2 text-xs text-slate-900 outline-none"
-                    />
-                    <button
-                      type="submit"
-                      disabled={isGrading || !claimantAnswer.trim()}
-                      className="w-full py-2.5 px-3 rounded-lg bg-blue-600 hover:bg-blue-700 disabled:opacity-40 text-white font-bold text-xs flex items-center justify-center gap-2 transition cursor-pointer"
-                    >
-                      <Send className="w-3.5 h-3.5" />
-                      {isGrading ? 'กำลังตรวจคำตอบด้วย Gemini AI...' : 'ส่งคำตอบเพื่อปลดล็อกภาพและจุดนัดรับ'}
-                    </button>
-                  </div>
-                </form>
-
-                {claimResult && (
-                  <div
-                    className={`p-4 rounded-xl border space-y-2 ${claimResult.is_verified
-                        ? 'border-emerald-300 bg-emerald-50 text-emerald-950'
-                        : 'border-red-300 bg-red-50 text-red-900'
-                      }`}
-                  >
-                    <div className="flex items-center justify-between font-bold">
-                      <div className="flex items-center gap-1.5">
-                        {claimResult.is_verified ? (
-                          <Unlock className="w-4 h-4 text-emerald-600" />
-                        ) : (
-                          <XCircle className="w-4 h-4 text-red-600" />
-                        )}
-                        <span>
-                          {claimResult.is_verified
-                            ? 'ยืนยันเจ้าของสำเร็จ! ปลดล็อกภาพจริงแล้ว'
-                            : 'คำตอบไม่ตรงกับข้อมูลในตู้นิรภัย'}
-                        </span>
-                      </div>
-                      <span className="text-[11px] px-2 py-0.5 rounded-full bg-white border border-slate-200">
-                        ความแม่นยำ {claimResult.confidence_score}%
-                      </span>
-                    </div>
-
-                    <p className="text-xs leading-relaxed">{claimResult.reasoning}</p>
-
-                    {claimResult.is_verified && (
-                      <div className="pt-2 border-t border-emerald-200 space-y-1.5">
-                        <div className="flex items-center gap-1.5 text-blue-700 font-bold text-xs">
-                          <MapPin className="w-4 h-4" />
-                          <span>Samaritan Shield // จุดนัดรับปลอดภัยที่มีกล้องวงจรปิด (CCTV)</span>
-                        </div>
-                        <p className="text-xs text-slate-800 bg-white p-2.5 rounded-lg border border-emerald-200">
-                          <strong>จุดนัดรับแนะนำ:</strong> {claimResult.safe_handoff_point}
-                        </p>
-                      </div>
-                    )}
-                  </div>
-                )}
-              </div>
-            )}
-          </div>
-        )}
-
-        {activePillar === 'PILLAR_4_QR' && (
-          <div className="bg-white border border-slate-200 rounded-2xl p-5 shadow-xs space-y-4 text-xs">
-            <div className="flex items-center justify-between">
-              <h2 className="text-sm font-bold text-slate-900">
-                สร้าง QR ป้องกันของหาย (Samaritan Shield)
-              </h2>
-              <QrCode className="w-5 h-5 text-blue-600" />
-            </div>
-            <p className="text-slate-600 leading-relaxed">
-              เมื่อผู้พบของสแกน QR นี้ด้วยกล้องมือถือ จะเข้าสู่หน้าเว็บแจ้งพิกัดและถ่ายรูปส่งเข้าตู้นิรภัย AI ทันทีโดยไม่ต้องติดตั้งแอป
-            </p>
-
-            <div className="grid grid-cols-2 gap-2">
-              <button
-                onClick={() => setQrMode('LOCKSCREEN')}
-                className={`py-2.5 px-3 rounded-xl border font-semibold cursor-pointer ${qrMode === 'LOCKSCREEN'
-                    ? 'border-blue-600 bg-blue-50 text-blue-700'
-                    : 'border-slate-200 bg-slate-50 text-slate-700'
-                  }`}
-              >
-                ภาพหน้าจอล็อกมือถือ
-              </button>
-              <button
-                onClick={() => setQrMode('STICKER')}
-                className={`py-2.5 px-3 rounded-xl border font-semibold cursor-pointer ${qrMode === 'STICKER'
-                    ? 'border-blue-600 bg-blue-50 text-blue-700'
-                    : 'border-slate-200 bg-slate-50 text-slate-700'
-                  }`}
-              >
-                สติกเกอร์ติดสิ่งของ
-              </button>
-            </div>
-
-            <div className="space-y-1.5">
-              <label className="block text-slate-700 font-bold">รหัสประจำสิ่งของ (Tag ID)</label>
-              <input
-                type="text"
-                value={tagId}
-                onChange={(e) => setTagId(e.target.value)}
-                className="w-full bg-slate-50 border border-slate-300 rounded-lg px-3 py-2 text-slate-900"
-              />
-            </div>
-
-            <div className="space-y-1.5">
-              <label className="block text-slate-700 font-bold">รางวัลนำส่งคืน (Bounty)</label>
-              <input
-                type="text"
-                value={bountyAmount}
-                onChange={(e) => setBountyAmount(e.target.value)}
-                className="w-full bg-slate-50 border border-slate-300 rounded-lg px-3 py-2 text-slate-900"
-              />
-            </div>
-
-            <div className="space-y-1.5">
-              <label className="block text-slate-700 font-bold">ข้อความบนป้าย</label>
-              <input
-                type="text"
-                value={ownerNote}
-                onChange={(e) => setOwnerNote(e.target.value)}
-                className="w-full bg-slate-50 border border-slate-300 rounded-lg px-3 py-2 text-slate-900"
-              />
-            </div>
-
-            <button
-              onClick={downloadQrShield}
-              className="w-full py-2.5 px-4 rounded-xl bg-blue-600 hover:bg-blue-700 text-white font-bold flex items-center justify-center gap-2 shadow-xs transition cursor-pointer"
-            >
-              <Download className="w-4 h-4" />
-              <span>ดาวน์โหลดรูปภาพ QR (.PNG)</span>
-            </button>
-
-            <a
-              href={`/found?tag=${encodeURIComponent(tagId)}&bounty=${encodeURIComponent(bountyAmount)}`}
-              target="_blank"
-              rel="noreferrer"
-              className="w-full py-2.5 px-4 rounded-xl border border-slate-300 hover:bg-slate-100 text-slate-800 font-bold flex items-center justify-center gap-2 transition"
-            >
-              <ExternalLink className="w-4 h-4 text-blue-600" />
-              <span>ทดสอบเปิดหน้าเว็บผู้พบของ (/found)</span>
-            </a>
-          </div>
-        )}
-      </aside>
-
-      {/* Right Framed Map & Visual Workbench (8 cols) */}
-      <main className="lg:col-span-8 bg-white border border-slate-200 rounded-2xl shadow-xs overflow-hidden relative min-h-[600px] flex flex-col">
-        {(activePillar === 'PILLAR_1_IMU' || activePillar === 'PILLAR_2_PET') && (
-          <div className="absolute top-4 left-4 right-4 z-10 flex flex-wrap items-center justify-between gap-2 pointer-events-none">
-            <div className="bg-white/95 backdrop-blur border border-slate-200 px-3.5 py-2 rounded-xl shadow-sm text-xs text-slate-700 pointer-events-auto">
-              {activePillar === 'PILLAR_1_IMU' ? (
-                isClickToAddNode ? (
-                  <span className="text-blue-700 font-bold">
-                    [โหมดปักหมุดทำงานอยู่] คลิกจุดไหนก็ได้บนแผนที่เพื่อเพิ่มพิกัดทำของตก
-                  </span>
-                ) : (
-                  <span>
-                    <strong>คำแนะนำ:</strong> คลิกการ์ดด้านซ้ายเพื่อซูมดูจุดเสี่ยง หรือกดปุ่ม <strong>"ปักหมุดเส้นทางเอง"</strong>
-                  </span>
-                )
-              ) : (
-                <span>
-                  <strong>คำแนะนำ:</strong> คลิกบนแผนที่เพื่อ{' '}
-                  <strong className="text-blue-700">
-                    {petClickMode === 'MOVE_ORIGIN'
-                      ? 'ตั้งจุดเริ่มต้นที่สัตว์เลี้ยงหาย'
-                      : 'แจ้งจุดที่มีคนพบเห็นสัตว์เลี้ยงล่าสุด'}
-                  </strong>
-                </span>
-              )}
-            </div>
-
-            <div className="flex items-center gap-2 pointer-events-auto">
-              <button
-                onClick={handleLocateMe}
-                className="bg-white hover:bg-slate-50 text-blue-700 border border-slate-300 px-3.5 py-2 rounded-xl text-xs font-bold flex items-center gap-1.5 shadow-sm cursor-pointer transition"
-              >
-                <LocateFixed className="w-4 h-4 text-blue-600" />
-                <span>พิกัดปัจจุบันของฉัน</span>
-              </button>
-
-              <button
-                onClick={toggleMapStyle}
-                className="bg-white hover:bg-slate-50 text-slate-800 border border-slate-300 px-3.5 py-2 rounded-xl text-xs font-bold flex items-center gap-1.5 shadow-sm cursor-pointer transition"
-              >
-                <MapIcon className="w-4 h-4 text-blue-600" />
-                <span>
-                  {mapStyleMode === 'OSM_STREET'
-                    ? 'สลับเป็นโหมดเรดาร์มืด'
-                    : 'สลับเป็นแผนที่ถนนจริง'}
-                </span>
-              </button>
-            </div>
-          </div>
-        )}
-
-        {/* Explicit Height Container so MapLibre GL Always Renders */}
-        <div
-          className={`relative w-full h-[620px] ${activePillar === 'PILLAR_1_IMU' || activePillar === 'PILLAR_2_PET'
-              ? 'block'
-              : 'hidden'
-            }`}
-        >
-          <div
-            ref={mapContainerRef}
-            style={{ position: 'absolute', inset: 0, width: '100%', height: '100%' }}
-            className="w-full h-full"
-          />
-          <canvas
-            ref={overlayCanvasRef}
-            style={{ position: 'absolute', inset: 0, width: '100%', height: '100%' }}
-            className="pointer-events-none absolute inset-0 w-full h-full z-[5]"
-          />
-        </div>
-
-        {activePillar === 'PILLAR_3_VISION' && (
-          <div className="w-full h-[620px] flex flex-col items-center justify-center p-6 bg-slate-50">
-            {imageSrc ? (
-              <div className="space-y-3 max-w-full">
-                <div
-                  className={`text-xs flex items-center gap-2 font-bold ${claimResult?.is_verified ? 'text-emerald-700' : 'text-red-600'
                     }`}
                 >
-                  {claimResult?.is_verified ? (
-                    <>
-                      <Unlock className="w-4 h-4" />
-                      <span>ยืนยันตัวตนเจ้าของสำเร็จ // เปิดเผยภาพต้นฉบับแล้ว</span>
-                    </>
-                  ) : (
-                    <>
-                      <EyeOff className="w-4 h-4" />
-                      <span>ภาพสำหรับแสดงต่อสาธารณะ (AI เบลอตำหนิลับและข้อมูลสำคัญแล้ว)</span>
-                    </>
-                  )}
+                  คลิกแผนที่ตั้งจุดที่หาย
+                </button>
+                <button
+                  onClick={() => setPetClickMode('SIGHTING')}
+                  className={`py-2.5 px-2.5 rounded-xl border text-xs font-semibold cursor-pointer transition ${petClickMode === 'SIGHTING'
+                    ? 'bg-amber-500 border-amber-500 text-white'
+                    : 'bg-slate-50 border-slate-300 text-slate-700 hover:bg-slate-100'
+                    }`}
+                >
+                  คลิกแผนที่แจ้งจุดพบเห็น
+                </button>
+              </div>
+
+              <div className="space-y-2">
+                <label className="text-xs font-bold text-slate-700 block">
+                  เลือกโปรไฟล์พฤติกรรมสัตว์เลี้ยง
+                </label>
+                <div className="grid grid-cols-3 gap-2">
+                  {[
+                    { id: 'SHY_CAT', label: 'แมวขี้กลัว (ซ่อนตัว)' },
+                    { id: 'SPOOKED_DOG', label: 'สุนัขตื่นตกใจ (วิ่งเร็ว)' },
+                    { id: 'CURIOUS_DOG', label: 'สุนัขเชื่อง (เดินตามซอย)' },
+                  ].map((item) => (
+                    <button
+                      key={item.id}
+                      onClick={() => setPetProfile(item.id as PetBehaviorProfile)}
+                      className={`py-2.5 px-2 text-xs rounded-xl border font-semibold cursor-pointer transition ${petProfile === item.id
+                        ? 'border-blue-600 bg-blue-50 text-blue-700'
+                        : 'border-slate-200 bg-slate-50 text-slate-700 hover:bg-slate-100'
+                        }`}
+                    >
+                      {item.label}
+                    </button>
+                  ))}
                 </div>
-                <canvas
-                  ref={redactCanvasRef}
-                  className="max-h-[500px] w-auto border border-slate-300 rounded-xl shadow-md bg-white"
+              </div>
+
+              <div className="space-y-1.5">
+                <div className="flex justify-between text-xs font-bold">
+                  <span className="text-slate-700">เวลาที่ผ่านไปหลังหลุดหาย</span>
+                  <span className="text-blue-600">{elapsedMinutes} นาที</span>
+                </div>
+                <input
+                  type="range"
+                  min={10}
+                  max={140}
+                  step={5}
+                  value={elapsedMinutes}
+                  onChange={(e) => setElapsedMinutes(Number(e.target.value))}
+                  className="w-full accent-blue-600"
                 />
               </div>
-            ) : (
-              <div className="text-center text-slate-500 text-xs space-y-2 max-w-sm bg-white p-8 rounded-2xl border border-slate-200 shadow-xs">
-                <ShieldCheck className="w-12 h-12 mx-auto text-blue-600" />
-                <p className="font-bold text-sm text-slate-900">
-                  ยังไม่มีรูปภาพสิ่งของในหน้าต่างตรวจสอบ
-                </p>
-                <p className="text-slate-600 leading-relaxed">
-                  กดปุ่ม <strong>"อัปโหลดรูปสิ่งของที่พบ"</strong> ด้านซ้ายมือ เพื่อให้ Gemini Vision AI ตรวจจับตำหนิและสร้างกรอบเบลออัตโนมัติ
-                </p>
-              </div>
-            )}
-          </div>
-        )}
 
-        {activePillar === 'PILLAR_4_QR' && (
-          <div className="w-full h-[620px] flex flex-col items-center justify-center p-6 bg-slate-50">
+              <button
+                onClick={() => setIsStorming(!isStorming)}
+                className={`w-full py-2.5 px-3 rounded-xl border text-xs font-semibold flex items-center justify-center gap-2 transition cursor-pointer ${isStorming
+                  ? 'border-blue-600 bg-blue-50 text-blue-700'
+                  : 'border-slate-300 bg-slate-50 text-slate-700 hover:bg-slate-100'
+                  }`}
+              >
+                <CloudRain className="w-4 h-4" />
+                {isStorming
+                  ? 'โหมดฝนตก/ฟ้าร้อง: เปิดใช้งาน (หาที่หลบฝน 2 เท่า)'
+                  : 'จำลองสภาพอากาศฝนตก / ฟ้าร้อง'}
+              </button>
+
+              {sightingCoord && (
+                <button
+                  onClick={() => setSightingCoord(null)}
+                  className="w-full py-2.5 rounded-xl border border-red-300 bg-red-50 text-red-700 text-xs font-semibold flex items-center justify-center gap-2 cursor-pointer"
+                >
+                  <Crosshair className="w-4 h-4" />
+                  รีเซ็ตกลับไปยังจุดเริ่มต้นที่สัตว์เลี้ยงหาย
+                </button>
+              )}
+            </div>
+          )}
+
+          {activePillar === 'PILLAR_3_VISION' && (
+            <div className="bg-white border border-slate-200 rounded-2xl p-5 shadow-xs space-y-4">
+              <div className="flex items-center justify-between">
+                <h2 className="text-sm font-bold text-slate-900">
+                  ระบบ AI เบลอข้อมูลสำคัญ & ยืนยันเจ้าของ
+                </h2>
+                <ShieldCheck className="w-5 h-5 text-blue-600" />
+              </div>
+              <p className="text-xs text-slate-600 leading-relaxed">
+                1. อัปโหลดรูปสิ่งของที่พบ<br />
+                2. Gemini AI เบลอตำหนิลับและข้อมูลบัตรโดยอัตโนมัติ<br />
+                3. ตอบคำถามยืนยันตัวตนเพื่อปลดล็อกภาพจริงและจุดนัดรับปลอดภัย
+              </p>
+
+              <label className="flex flex-col items-center justify-center border-2 border-dashed border-blue-400 hover:border-blue-600 bg-blue-50/40 rounded-2xl p-5 cursor-pointer transition">
+                <Upload className="w-6 h-6 text-blue-600 mb-1.5" />
+                <span className="text-xs text-blue-700 font-bold">
+                  ขั้นตอนที่ 1: อัปโหลดรูปสิ่งของที่พบ (JPG / PNG)
+                </span>
+                <span className="text-[11px] text-slate-500 mt-0.5">
+                  ทดสอบด้วยรูปกระเป๋าสตางค์ บัตร หรือสิ่งของที่มีโลโก้
+                </span>
+                <input type="file" accept="image/*" onChange={handleImageUpload} className="hidden" />
+              </label>
+
+              {isScanning && (
+                <div className="p-3.5 border border-blue-200 bg-blue-50 rounded-xl text-xs text-blue-800 flex items-center gap-3 font-medium">
+                  <Sparkles className="w-4 h-4 animate-spin shrink-0 text-blue-600" />
+                  <span>Gemini AI กำลังแยกตำหนิลับและเบลอข้อมูลสำคัญ...</span>
+                </div>
+              )}
+
+              {scanError && (
+                <div className="p-3 border border-red-300 bg-red-50 rounded-xl text-xs text-red-700">
+                  เกิดข้อผิดพลาด: {scanError}
+                </div>
+              )}
+
+              {forensicData && (
+                <div className="space-y-3.5 text-xs">
+                  <div className="p-3.5 border border-emerald-200 bg-emerald-50/70 rounded-xl space-y-1">
+                    <div className="flex items-center gap-1.5 text-emerald-800 font-bold mb-1">
+                      <CheckCircle2 className="w-4 h-4 text-emerald-600" />
+                      <span>ข้อมูลทั่วไปที่แสดงต่อสาธารณะ (Public Macro Tags)</span>
+                    </div>
+                    <p><strong>หมวดหมู่:</strong> {forensicData.public_payload.category}</p>
+                    <p><strong>สี:</strong> {forensicData.public_payload.color}</p>
+                    <p><strong>แบรนด์:</strong> {forensicData.public_payload.brand}</p>
+                    <p className="mt-1 text-slate-700">{forensicData.public_payload.public_summary}</p>
+                  </div>
+
+                  <form
+                    onSubmit={handleGradeClaim}
+                    className="p-4 border border-amber-300 bg-amber-50/50 rounded-xl space-y-3"
+                  >
+                    <div className="flex items-center justify-between text-amber-900 font-bold">
+                      <div className="flex items-center gap-1.5">
+                        <Lock className="w-4 h-4 text-amber-700" />
+                        <span>ขั้นตอนที่ 2: ตอบคำถามยืนยันความเป็นเจ้าของ</span>
+                      </div>
+                      <button
+                        type="button"
+                        onClick={() => setShowDevSpoilers(!showDevSpoilers)}
+                        className="text-[11px] text-blue-600 hover:underline flex items-center gap-1 cursor-pointer"
+                      >
+                        <Eye className="w-3 h-3" />
+                        {showDevSpoilers ? 'ซ่อนเฉลย' : 'ดูเฉลย (สำหรับกรรมการ)'}
+                      </button>
+                    </div>
+
+                    <div className="space-y-1.5 text-slate-800 bg-white p-3 rounded-lg border border-amber-200">
+                      <p><strong>คำถาม (TH):</strong> {forensicData.challenge_prompt.th}</p>
+                      <p className="text-slate-500"><strong>EN:</strong> {forensicData.challenge_prompt.en}</p>
+                    </div>
+
+                    {showDevSpoilers && (
+                      <div className="p-2.5 bg-white border border-slate-200 rounded-lg text-[11px] text-slate-600 space-y-1">
+                        <p><strong>ความลับที่ถูกเบลอไว้:</strong> {forensicData.challenge_prompt.dev_preview_secret}</p>
+                        <p><strong>คำสำคัญ (TH):</strong> {forensicData.challenge_prompt.dev_preview_keywords_th?.join(', ')}</p>
+                        <p><strong>คำสำคัญ (EN):</strong> {forensicData.challenge_prompt.dev_preview_keywords_en?.join(', ')}</p>
+                      </div>
+                    )}
+
+                    <div className="space-y-2">
+                      <input
+                        type="text"
+                        value={claimantAnswer}
+                        onChange={(e) => setClaimantAnswer(e.target.value)}
+                        placeholder="พิมพ์คำตอบภาษาไทย หรือ ภาษาอังกฤษ..."
+                        className="w-full bg-white border border-slate-300 focus:border-blue-600 rounded-lg px-3 py-2 text-xs text-slate-900 outline-none"
+                      />
+                      <button
+                        type="submit"
+                        disabled={isGrading || !claimantAnswer.trim()}
+                        className="w-full py-2.5 px-3 rounded-lg bg-blue-600 hover:bg-blue-700 disabled:opacity-40 text-white font-bold text-xs flex items-center justify-center gap-2 transition cursor-pointer"
+                      >
+                        <Send className="w-3.5 h-3.5" />
+                        {isGrading ? 'กำลังตรวจคำตอบด้วย Gemini AI...' : 'ส่งคำตอบเพื่อปลดล็อกภาพและจุดนัดรับ'}
+                      </button>
+                    </div>
+                  </form>
+
+                  {claimResult && (
+                    <div
+                      className={`p-4 rounded-xl border space-y-2 ${claimResult.is_verified
+                        ? 'border-emerald-300 bg-emerald-50 text-emerald-950'
+                        : 'border-red-300 bg-red-50 text-red-900'
+                        }`}
+                    >
+                      <div className="flex items-center justify-between font-bold">
+                        <div className="flex items-center gap-1.5">
+                          {claimResult.is_verified ? (
+                            <Unlock className="w-4 h-4 text-emerald-600" />
+                          ) : (
+                            <XCircle className="w-4 h-4 text-red-600" />
+                          )}
+                          <span>
+                            {claimResult.is_verified
+                              ? 'ยืนยันเจ้าของสำเร็จ! ปลดล็อกภาพจริงแล้ว'
+                              : 'คำตอบไม่ตรงกับข้อมูลในตู้นิรภัย'}
+                          </span>
+                        </div>
+                        <span className="text-[11px] px-2 py-0.5 rounded-full bg-white border border-slate-200">
+                          ความแม่นยำ {claimResult.confidence_score}%
+                        </span>
+                      </div>
+
+                      <p className="text-xs leading-relaxed">{claimResult.reasoning}</p>
+
+                      {claimResult.is_verified && (
+                        <div className="pt-2 border-t border-emerald-200 space-y-1.5">
+                          <div className="flex items-center gap-1.5 text-blue-700 font-bold text-xs">
+                            <MapPin className="w-4 h-4" />
+                            <span>Samaritan Shield // จุดนัดรับปลอดภัยที่มีกล้องวงจรปิด (CCTV)</span>
+                          </div>
+                          <p className="text-xs text-slate-800 bg-white p-2.5 rounded-lg border border-emerald-200">
+                            <strong>จุดนัดรับแนะนำ:</strong> {claimResult.safe_handoff_point}
+                          </p>
+                        </div>
+                      )}
+                    </div>
+                  )}
+                </div>
+              )}
+            </div>
+          )}
+
+          {activePillar === 'PILLAR_4_QR' && (
+            <div className="bg-white border border-slate-200 rounded-2xl p-5 shadow-xs space-y-4 text-xs">
+              <div className="flex items-center justify-between">
+                <h2 className="text-sm font-bold text-slate-900">
+                  สร้าง QR ป้องกันของหาย (Samaritan Shield)
+                </h2>
+                <QrCode className="w-5 h-5 text-blue-600" />
+              </div>
+              <p className="text-slate-600 leading-relaxed">
+                เมื่อผู้พบของสแกน QR นี้ด้วยกล้องมือถือ จะเข้าสู่หน้าเว็บแจ้งพิกัดและถ่ายรูปส่งเข้าตู้นิรภัย AI ทันทีโดยไม่ต้องติดตั้งแอป
+              </p>
+
+              <div className="grid grid-cols-2 gap-2">
+                <button
+                  onClick={() => setQrMode('LOCKSCREEN')}
+                  className={`py-2.5 px-3 rounded-xl border font-semibold cursor-pointer ${qrMode === 'LOCKSCREEN'
+                    ? 'border-blue-600 bg-blue-50 text-blue-700'
+                    : 'border-slate-200 bg-slate-50 text-slate-700'
+                    }`}
+                >
+                  ภาพหน้าจอล็อกมือถือ
+                </button>
+                <button
+                  onClick={() => setQrMode('STICKER')}
+                  className={`py-2.5 px-3 rounded-xl border font-semibold cursor-pointer ${qrMode === 'STICKER'
+                    ? 'border-blue-600 bg-blue-50 text-blue-700'
+                    : 'border-slate-200 bg-slate-50 text-slate-700'
+                    }`}
+                >
+                  สติกเกอร์ติดสิ่งของ
+                </button>
+              </div>
+
+              <div className="space-y-1.5">
+                <label className="block text-slate-700 font-bold">รหัสประจำสิ่งของ (Tag ID)</label>
+                <input
+                  type="text"
+                  value={tagId}
+                  onChange={(e) => setTagId(e.target.value)}
+                  className="w-full bg-slate-50 border border-slate-300 rounded-lg px-3 py-2 text-slate-900"
+                />
+              </div>
+
+              <div className="space-y-1.5">
+                <label className="block text-slate-700 font-bold">รางวัลนำส่งคืน (Bounty)</label>
+                <input
+                  type="text"
+                  value={bountyAmount}
+                  onChange={(e) => setBountyAmount(e.target.value)}
+                  className="w-full bg-slate-50 border border-slate-300 rounded-lg px-3 py-2 text-slate-900"
+                />
+              </div>
+
+              <div className="space-y-1.5">
+                <label className="block text-slate-700 font-bold">ข้อความบนป้าย</label>
+                <input
+                  type="text"
+                  value={ownerNote}
+                  onChange={(e) => setOwnerNote(e.target.value)}
+                  className="w-full bg-slate-50 border border-slate-300 rounded-lg px-3 py-2 text-slate-900"
+                />
+              </div>
+
+              <button
+                onClick={downloadQrShield}
+                className="w-full py-2.5 px-4 rounded-xl bg-blue-600 hover:bg-blue-700 text-white font-bold flex items-center justify-center gap-2 shadow-xs transition cursor-pointer"
+              >
+                <Download className="w-4 h-4" />
+                <span>ดาวน์โหลดรูปภาพ QR (.PNG)</span>
+              </button>
+
+              <a
+                href={`/found?tag=${encodeURIComponent(tagId)}&bounty=${encodeURIComponent(bountyAmount)}`}
+                target="_blank"
+                rel="noreferrer"
+                className="w-full py-2.5 px-4 rounded-xl border border-slate-300 hover:bg-slate-100 text-slate-800 font-bold flex items-center justify-center gap-2 transition"
+              >
+                <ExternalLink className="w-4 h-4 text-blue-600" />
+                <span>ทดสอบเปิดหน้าเว็บผู้พบของ (/found)</span>
+              </a>
+            </div>
+          )}
+        </aside>
+
+        {/* Right Framed Map & Visual Workbench (8 cols) */}
+        <main className="lg:col-span-8 bg-white border border-slate-200 rounded-2xl shadow-xs overflow-hidden relative min-h-[600px] flex flex-col">
+          {(activePillar === 'PILLAR_1_IMU' || activePillar === 'PILLAR_2_PET') && (
+            <div className="absolute top-4 left-4 right-4 z-10 flex flex-wrap items-center justify-between gap-2 pointer-events-none">
+              <div className="bg-white/95 backdrop-blur border border-slate-200 px-3.5 py-2 rounded-xl shadow-sm text-xs text-slate-700 pointer-events-auto">
+                {activePillar === 'PILLAR_1_IMU' ? (
+                  isClickToAddNode ? (
+                    <span className="text-blue-700 font-bold">
+                      [โหมดปักหมุดทำงานอยู่] คลิกจุดไหนก็ได้บนแผนที่เพื่อเพิ่มพิกัดทำของตก
+                    </span>
+                  ) : (
+                    <span>
+                      <strong>คำแนะนำ:</strong> คลิกการ์ดด้านซ้ายเพื่อซูมดูจุดเสี่ยง หรือกดปุ่ม <strong>"ปักหมุดเส้นทางเอง"</strong>
+                    </span>
+                  )
+                ) : (
+                  <span>
+                    <strong>คำแนะนำ:</strong> คลิกบนแผนที่เพื่อ{' '}
+                    <strong className="text-blue-700">
+                      {petClickMode === 'MOVE_ORIGIN'
+                        ? 'ตั้งจุดเริ่มต้นที่สัตว์เลี้ยงหาย'
+                        : 'แจ้งจุดที่มีคนพบเห็นสัตว์เลี้ยงล่าสุด'}
+                    </strong>
+                  </span>
+                )}
+              </div>
+
+              <div className="flex items-center gap-2 pointer-events-auto">
+                <button
+                  onClick={handleLocateMe}
+                  className="bg-white hover:bg-slate-50 text-blue-700 border border-slate-300 px-3.5 py-2 rounded-xl text-xs font-bold flex items-center gap-1.5 shadow-sm cursor-pointer transition"
+                >
+                  <LocateFixed className="w-4 h-4 text-blue-600" />
+                  <span>พิกัดปัจจุบันของฉัน</span>
+                </button>
+
+                <button
+                  onClick={toggleMapStyle}
+                  className="bg-white hover:bg-slate-50 text-slate-800 border border-slate-300 px-3.5 py-2 rounded-xl text-xs font-bold flex items-center gap-1.5 shadow-sm cursor-pointer transition"
+                >
+                  <MapIcon className="w-4 h-4 text-blue-600" />
+                  <span>
+                    {mapStyleMode === 'OSM_STREET'
+                      ? 'สลับเป็นโหมดเรดาร์มืด'
+                      : 'สลับเป็นแผนที่ถนนจริง'}
+                  </span>
+                </button>
+              </div>
+            </div>
+          )}
+
+          {/* Explicit Height Container so MapLibre GL Always Renders */}
+          <div
+            className={`relative w-full h-[620px] ${activePillar === 'PILLAR_1_IMU' || activePillar === 'PILLAR_2_PET'
+              ? 'block'
+              : 'hidden'
+              }`}
+          >
+            <div
+              ref={mapContainerRef}
+              style={{
+                position: 'absolute',
+                inset: 0,
+                width: '100%',
+                height: '100%',
+                filter:
+                  mapStyleMode === 'CARTO_DARK'
+                    ? 'invert(92%) hue-rotate(180deg) brightness(95%) contrast(92%)'
+                    : 'none',
+              }}
+              className="w-full h-full transition-[filter] duration-300"
+            />
             <canvas
-              ref={qrCanvasRef}
-              className="max-h-[540px] w-auto border border-slate-300 rounded-2xl shadow-lg"
+              ref={overlayCanvasRef}
+              style={{ position: 'absolute', inset: 0, width: '100%', height: '100%' }}
+              className="pointer-events-none absolute inset-0 w-full h-full z-[5]"
             />
           </div>
-        )}
-      </main>
+
+          {activePillar === 'PILLAR_3_VISION' && (
+            <div className="w-full h-[620px] flex flex-col items-center justify-center p-6 bg-slate-50">
+              {imageSrc ? (
+                <div className="space-y-3 max-w-full">
+                  <div
+                    className={`text-xs flex items-center gap-2 font-bold ${claimResult?.is_verified ? 'text-emerald-700' : 'text-red-600'
+                      }`}
+                  >
+                    {claimResult?.is_verified ? (
+                      <>
+                        <Unlock className="w-4 h-4" />
+                        <span>ยืนยันตัวตนเจ้าของสำเร็จ // เปิดเผยภาพต้นฉบับแล้ว</span>
+                      </>
+                    ) : (
+                      <>
+                        <EyeOff className="w-4 h-4" />
+                        <span>ภาพสำหรับแสดงต่อสาธารณะ (AI เบลอตำหนิลับและข้อมูลสำคัญแล้ว)</span>
+                      </>
+                    )}
+                  </div>
+                  <canvas
+                    ref={redactCanvasRef}
+                    className="max-h-[500px] w-auto border border-slate-300 rounded-xl shadow-md bg-white"
+                  />
+                </div>
+              ) : (
+                <div className="text-center text-slate-500 text-xs space-y-2 max-w-sm bg-white p-8 rounded-2xl border border-slate-200 shadow-xs">
+                  <ShieldCheck className="w-12 h-12 mx-auto text-blue-600" />
+                  <p className="font-bold text-sm text-slate-900">
+                    ยังไม่มีรูปภาพสิ่งของในหน้าต่างตรวจสอบ
+                  </p>
+                  <p className="text-slate-600 leading-relaxed">
+                    กดปุ่ม <strong>"อัปโหลดรูปสิ่งของที่พบ"</strong> ด้านซ้ายมือ เพื่อให้ Gemini Vision AI ตรวจจับตำหนิและสร้างกรอบเบลออัตโนมัติ
+                  </p>
+                </div>
+              )}
+            </div>
+          )}
+
+          {activePillar === 'PILLAR_4_QR' && (
+            <div className="w-full h-[620px] flex flex-col items-center justify-center p-6 bg-slate-50">
+              <canvas
+                ref={qrCanvasRef}
+                className="max-h-[540px] w-auto border border-slate-300 rounded-2xl shadow-lg"
+              />
+            </div>
+          )}
+        </main>
+      </div>
     </div>
-  </div>
-);
+  );
 }
