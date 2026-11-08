@@ -1,6 +1,6 @@
 'use client';
 
-import React, { useState, useEffect, useRef } from 'react';
+import React, { useState, useEffect, useRef, useCallback } from 'react';
 import * as maplibregl from 'maplibre-gl';
 import 'maplibre-gl/dist/maplibre-gl.css';
 import {
@@ -166,6 +166,7 @@ export default function TraceDeterministicFrostedApp() {
 
   // Map & Refs
   const mapContainerRef = useRef<HTMLDivElement | null>(null);
+  const pathCanvasRef = useRef<HTMLCanvasElement | null>(null);
   const mapRef = useRef<maplibregl.Map | null>(null);
   const markersRef = useRef<maplibregl.Marker[]>([]);
   const redactCanvasRef = useRef<HTMLCanvasElement | null>(null);
@@ -275,6 +276,193 @@ export default function TraceDeterministicFrostedApp() {
     };
   }, [mode, isCustomPinning, telemetry.length, petClickMode]);
 
+  // วาดเส้นเชื่อมพิกัดจากหมุดไปหมุด (Pin-to-Pin Trajectory Path & Directional Arrows)
+  const renderPathOverlay = useCallback(() => {
+    const map = mapRef.current;
+    const canvas = pathCanvasRef.current;
+    if (!map || !canvas) return;
+
+    const ctx = canvas.getContext('2d');
+    if (!ctx) return;
+
+    const dpr = typeof window !== 'undefined' ? window.devicePixelRatio || 1 : 1;
+    const rect = canvas.getBoundingClientRect();
+    if (canvas.width !== Math.round(rect.width * dpr) || canvas.height !== Math.round(rect.height * dpr)) {
+      canvas.width = Math.round(rect.width * dpr);
+      canvas.height = Math.round(rect.height * dpr);
+    }
+
+    ctx.save();
+    ctx.scale(dpr, dpr);
+    ctx.clearRect(0, 0, rect.width, rect.height);
+
+    // Helper: วาดหัวลูกศรบอกทิศทางการเดินระหว่างหมุด
+    const drawArrowhead = (x1: number, y1: number, x2: number, y2: number, color: string) => {
+      const midX = (x1 + x2) / 2;
+      const midY = (y1 + y2) / 2;
+      const angle = Math.atan2(y2 - y1, x2 - x1);
+      const size = 6.5;
+
+      ctx.save();
+      ctx.translate(midX, midY);
+      ctx.rotate(angle);
+      ctx.beginPath();
+      ctx.moveTo(size, 0);
+      ctx.lineTo(-size, -size * 0.75);
+      ctx.lineTo(-size * 0.4, 0);
+      ctx.lineTo(-size, size * 0.75);
+      ctx.closePath();
+      ctx.fillStyle = color;
+      ctx.fill();
+      ctx.strokeStyle = '#ffffff';
+      ctx.lineWidth = 1.5;
+      ctx.stroke();
+      ctx.restore();
+    };
+
+    if (mode === 'loser' && dropNodes.length > 1) {
+      const projected = dropNodes.map((n) => ({
+        node: n,
+        pt: map.project([n.lng, n.lat]),
+      }));
+
+      // 1. วาดเส้นขอบสีขาวด้านนอก (Outer Frosted Halo) เพื่อให้เห็นเส้นทางชัดเจนบนแผนที่ถนน
+      ctx.beginPath();
+      ctx.lineCap = 'round';
+      ctx.lineJoin = 'round';
+      ctx.strokeStyle = 'rgba(255, 255, 255, 0.92)';
+      ctx.lineWidth = 9;
+      projected.forEach((item, idx) => {
+        if (idx === 0) ctx.moveTo(item.pt.x, item.pt.y);
+        else ctx.lineTo(item.pt.x, item.pt.y);
+      });
+      ctx.stroke();
+
+      // 2. วาดเส้นทางหลักแยกตามระดับความเสี่ยงจากหมุดไปหมุด + ลูกศรบอกทิศทาง
+      for (let i = 0; i < projected.length - 1; i++) {
+        const curr = projected[i];
+        const next = projected[i + 1];
+        const nextScore = Math.round(next.node.dropProbability * 100);
+        const isHighSegment = (nextScore >= 50 && !next.node.cleared) || (Math.round(curr.node.dropProbability * 100) >= 50 && !curr.node.cleared);
+        const isClearedSegment = Boolean(curr.node.cleared && next.node.cleared);
+
+        ctx.save();
+        ctx.beginPath();
+        ctx.lineCap = 'round';
+        ctx.lineJoin = 'round';
+        if (isClearedSegment) {
+          ctx.setLineDash([6, 6]);
+          ctx.strokeStyle = '#94a3b8';
+          ctx.lineWidth = 3.5;
+        } else if (isHighSegment) {
+          ctx.strokeStyle = '#ef4444';
+          ctx.lineWidth = 4.5;
+        } else {
+          ctx.strokeStyle = '#0284c7';
+          ctx.lineWidth = 4;
+        }
+        ctx.moveTo(curr.pt.x, curr.pt.y);
+        ctx.lineTo(next.pt.x, next.pt.y);
+        ctx.stroke();
+        ctx.restore();
+
+        const dist = Math.hypot(next.pt.x - curr.pt.x, next.pt.y - curr.pt.y);
+        if (dist > 36) {
+          drawArrowhead(
+            curr.pt.x,
+            curr.pt.y,
+            next.pt.x,
+            next.pt.y,
+            isClearedSegment ? '#64748b' : isHighSegment ? '#dc2626' : '#0284c7'
+          );
+        }
+      }
+
+      // 3. วาดจุดเชื่อมใต้หมุดและรัศมีจุดที่เลือก (Selected Node Target Ring)
+      projected.forEach(({ node, pt }) => {
+        const isSel = selectedNode?.id === node.id;
+        const score = Math.round(node.dropProbability * 100);
+        const isHigh = score >= 50 && !node.cleared;
+
+        if (isSel) {
+          ctx.save();
+          ctx.beginPath();
+          ctx.arc(pt.x, pt.y, 26, 0, Math.PI * 2);
+          ctx.fillStyle = isHigh ? 'rgba(239, 68, 68, 0.16)' : 'rgba(2, 132, 199, 0.16)';
+          ctx.fill();
+          ctx.setLineDash([4, 4]);
+          ctx.strokeStyle = isHigh ? '#ef4444' : '#0284c7';
+          ctx.lineWidth = 1.8;
+          ctx.stroke();
+          ctx.restore();
+        }
+
+        ctx.beginPath();
+        ctx.arc(pt.x, pt.y, 5, 0, Math.PI * 2);
+        ctx.fillStyle = node.cleared ? '#94a3b8' : isHigh ? '#ef4444' : '#0284c7';
+        ctx.fill();
+        ctx.strokeStyle = '#ffffff';
+        ctx.lineWidth = 2;
+        ctx.stroke();
+      });
+    } else if (mode === 'pet' && sightings.length > 0) {
+      // วาดเส้นเวกเตอร์ทิศทางการเคลื่อนที่ของสัตว์เลี้ยงจาก T0 -> T1 -> T2...
+      const chain = [petOrigin, ...sightings];
+      const pts = chain.map((c) => map.project([c.lng, c.lat]));
+
+      ctx.beginPath();
+      ctx.lineCap = 'round';
+      ctx.lineJoin = 'round';
+      ctx.strokeStyle = 'rgba(255, 255, 255, 0.9)';
+      ctx.lineWidth = 7;
+      pts.forEach((p, idx) => {
+        if (idx === 0) ctx.moveTo(p.x, p.y);
+        else ctx.lineTo(p.x, p.y);
+      });
+      ctx.stroke();
+
+      ctx.save();
+      ctx.beginPath();
+      ctx.setLineDash([7, 5]);
+      ctx.strokeStyle = '#10b981';
+      ctx.lineWidth = 3.5;
+      pts.forEach((p, idx) => {
+        if (idx === 0) ctx.moveTo(p.x, p.y);
+        else ctx.lineTo(p.x, p.y);
+      });
+      ctx.stroke();
+      ctx.restore();
+
+      for (let i = 0; i < pts.length - 1; i++) {
+        if (Math.hypot(pts[i + 1].x - pts[i].x, pts[i + 1].y - pts[i].y) > 30) {
+          drawArrowhead(pts[i].x, pts[i].y, pts[i + 1].x, pts[i + 1].y, '#059669');
+        }
+      }
+    }
+
+    ctx.restore();
+  }, [mode, dropNodes, selectedNode, petOrigin, sightings]);
+
+  // ผูกการวาดเส้นทางเข้ากับการเลื่อน/ซูมแผนที่แบบ 60fps
+  useEffect(() => {
+    const map = mapRef.current;
+    if (!map) return;
+
+    map.on('load', renderPathOverlay);
+    map.on('move', renderPathOverlay);
+    map.on('zoom', renderPathOverlay);
+    map.on('resize', renderPathOverlay);
+
+    renderPathOverlay();
+
+    return () => {
+      map.off('load', renderPathOverlay);
+      map.off('move', renderPathOverlay);
+      map.off('zoom', renderPathOverlay);
+      map.off('resize', renderPathOverlay);
+    };
+  }, [renderPathOverlay]);
+
   // เรนเดอร์หมุดและเลเยอร์บนแผนที่
   useEffect(() => {
     const map = mapRef.current;
@@ -290,22 +478,24 @@ export default function TraceDeterministicFrostedApp() {
         const isHigh = score >= 50 && !isCleared;
         const el = document.createElement('div');
         el.className = 'cursor-pointer transition-transform duration-200 hover:scale-125';
+        el.style.zIndex = isHigh ? '10' : '5';
         el.innerHTML = `
           <div style="
             display:flex;align-items:center;gap:6px;
             padding:4px 10px;border-radius:999px;
             background:${isCleared
-            ? 'rgba(148,163,184,0.75)'
+            ? 'rgba(148,163,184,0.85)'
             : isHigh
-              ? 'rgba(239,68,68,0.92)'
-              : 'rgba(255,255,255,0.90)'
+              ? 'rgba(239,68,68,0.95)'
+              : 'rgba(255,255,255,0.94)'
           };
             color:${isCleared || isHigh ? '#ffffff' : '#0f172a'};
             border:1.5px solid ${isCleared ? '#94a3b8' : isHigh ? '#dc2626' : '#cbd5e1'
           };
-            box-shadow:0 8px 20px rgba(15,23,42,0.12);
+            box-shadow:0 8px 20px rgba(15,23,42,0.14);
             backdrop-filter:blur(8px);
             font-family:monospace;font-size:11px;font-weight:700;
+            transform:translateY(-14px);
           ">
             <span style="width:7px;height:7px;border-radius:99px;background:${isCleared ? '#e2e8f0' : isHigh ? '#fff' : '#0284c7'
           }"></span>
@@ -714,8 +904,12 @@ export default function TraceDeterministicFrostedApp() {
 
   return (
     <div className="relative w-screen h-screen overflow-hidden bg-[#eef2f6] text-slate-900 select-none font-sans">
-      {/* FULLSCREEN MAP CANVAS */}
+      {/* FULLSCREEN MAP CANVAS + PIN-TO-PIN TRAJECTORY PATH OVERLAY */}
       <div ref={mapContainerRef} className="absolute inset-0 w-full h-full z-0" />
+      <canvas
+        ref={pathCanvasRef}
+        className="pointer-events-none absolute inset-0 w-full h-full z-[1]"
+      />
 
       {/* TOP FROSTED CAPSULE BAR */}
       <header className="fixed top-4 left-4 right-4 z-20 flex items-center justify-between pointer-events-none">
