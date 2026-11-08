@@ -26,7 +26,19 @@ import {
   Award,
   Navigation,
   Plus,
-  Send
+  Send,
+  Settings,
+  Bell,
+  Wallet,
+  ShieldCheck,
+  Smartphone,
+  CreditCard,
+  Key,
+  Train,
+  BatteryCharging,
+  Globe,
+  Trash2,
+  ChevronRight
 } from 'lucide-react';
 import { calculateDropProbabilities, RawTelemetryPoint, DropNode } from '@/lib/imu-math';
 import { simulatePetDiffusion, BehaviorProfile, RadianceCell } from '@/lib/pet-diffusion';
@@ -41,7 +53,7 @@ const DEMO_TELEMETRY: RawTelemetryPoint[] = [
   { id: 'NODE-07', lat: 13.7396, lng: 100.5348, timestamp: 6000, speedKmh: 5.0, accelMagnitude: 11.4, gyroRate: 0.5, dwellSeconds: 12 },
 ];
 
-type Mode = 'loser' | 'pet' | 'vault' | 'qr';
+type Mode = 'loser' | 'pet' | 'vault' | 'qr' | 'profile' | 'settings';
 
 interface RedactionBox {
   label: string;
@@ -79,10 +91,35 @@ interface ClaimResult {
   safe_handoff_point?: string;
 }
 
-export default function TraceFrostedDaylightApp() {
+export default function TraceStandardFrostedApp() {
   const [mode, setMode] = useState<Mode>('loser');
   const [xp, setXp] = useState<number>(2950);
   const [toastMsg, setToastMsg] = useState<string | null>(null);
+  const [showNotifications, setShowNotifications] = useState(false);
+
+  // Base System: User Profile & Standard Settings State
+  const [userProfile] = useState({
+    id: 'TH-STD-9082',
+    name: 'PHUREEPHAT S.',
+    rank: 'GOLD SCOUT',
+    trustScore: 98,
+    escrowBalance: 1250,
+    rescuedCount: 14,
+  });
+
+  const [registeredAssets, setRegisteredAssets] = useState([
+    { id: 'TRC-8842-BKK', type: 'phone', label: 'iPhone 15 Pro', bounty: '500 THB', active: true },
+    { id: 'TRC-1094-BKK', type: 'card', label: 'Navy Cardholder', bounty: '300 THB', active: true },
+    { id: 'TRC-3321-BKK', type: 'key', label: 'Smart Key Fob', bounty: '200 THB', active: false },
+  ]);
+
+  const [settings, setSettings] = useState({
+    pdpaLocalBuffer: true,       // เก็บพิกัดในเครื่อง 48 ชม. ตามมาตรฐาน PDPA
+    transitAutoLink: true,       // ตรวจจับจุดเชื่อมต่อ BTS/MRT/รถเมล์อัตโนมัติ
+    lowPowerImu: false,          // โหมดประหยัดพลังงานเซนเซอร์
+    alertRadiusMeters: 50,       // รัศมีแจ้งเตือนพลเมืองดีใกล้เคียง
+    lang: 'TH' as 'TH' | 'EN',   // ภาษาหลัก
+  });
 
   // Pillar 1: IMU & Trajectory State
   const [telemetry, setTelemetry] = useState<RawTelemetryPoint[]>(DEMO_TELEMETRY);
@@ -269,7 +306,6 @@ export default function TraceFrostedDaylightApp() {
         sightings
       );
 
-      // แสดงจุดกระจายตัวเป็นวงกลมโปร่งแสงสไตล์ Frosted
       cells.slice(0, 45).forEach((cell) => {
         const el = document.createElement('div');
         const size = Math.max(18, Math.round(cell.probability * 56));
@@ -284,7 +320,6 @@ export default function TraceFrostedDaylightApp() {
         markersRef.current.push(m);
       });
 
-      // หมุดจุดเริ่มต้นสัตว์หาย
       const originEl = document.createElement('div');
       originEl.innerHTML = `
         <div style="
@@ -299,7 +334,6 @@ export default function TraceFrostedDaylightApp() {
         new maplibregl.Marker({ element: originEl }).setLngLat([petOrigin.lng, petOrigin.lat]).addTo(map)
       );
 
-      // หมุดจุดพบเห็น
       sightings.forEach((s) => {
         const sEl = document.createElement('div');
         sEl.innerHTML = `
@@ -329,13 +363,13 @@ export default function TraceFrostedDaylightApp() {
         body: JSON.stringify({
           lat: target?.lat ?? 13.7382,
           lng: target?.lng ?? 100.5325,
-          radiusMeters: 30,
+          radiusMeters: settings.alertRadiusMeters,
         }),
       });
       const data = await res.json();
       const count = Array.isArray(data?.matches) ? data.matches.length : 1;
       setRadarMatches(count);
-      triggerXpReward(80, '30m Spatial Scan');
+      triggerXpReward(80, `${settings.alertRadiusMeters}m Spatial Scan`);
     } catch {
       setRadarMatches(1);
     } finally {
@@ -343,14 +377,12 @@ export default function TraceFrostedDaylightApp() {
     }
   };
 
-  // Pillar 1: อัปโหลด GPX/JSON
   const handleGpxUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     if (!file) return;
     triggerXpReward(60, 'Trajectory Imported');
   };
 
-  // Pillar 1: บันทึก IMU มือถือสด
   const toggleLiveImu = () => {
     setIsRecordingImu((prev) => !prev);
     if (!isRecordingImu) {
@@ -539,11 +571,9 @@ export default function TraceFrostedDaylightApp() {
     canvas.width = 360;
     canvas.height = 560;
 
-    // Frosted Daylight Card Background
     ctx.fillStyle = '#f8fafc';
     ctx.fillRect(0, 0, canvas.width, canvas.height);
 
-    // Subtle Grid Lines
     ctx.strokeStyle = '#e2e8f0';
     ctx.lineWidth = 1;
     for (let i = 0; i < canvas.width; i += 24) {
@@ -559,7 +589,6 @@ export default function TraceFrostedDaylightApp() {
       ctx.stroke();
     }
 
-    // Center White Capsule
     ctx.fillStyle = '#ffffff';
     ctx.strokeStyle = '#cbd5e1';
     ctx.lineWidth = 2;
@@ -568,17 +597,15 @@ export default function TraceFrostedDaylightApp() {
     ctx.fill();
     ctx.stroke();
 
-    // Header Dot-Matrix Title
     ctx.fillStyle = '#0f172a';
     ctx.font = 'bold 14px monospace';
     ctx.textAlign = 'center';
-    ctx.fillText('TRACE // SHIELD', 180, 125);
+    ctx.fillText('TRACE // STANDARD', 180, 125);
 
     ctx.fillStyle = '#64748b';
     ctx.font = '11px monospace';
     ctx.fillText(tagId, 180, 146);
 
-    // Simulated High-Contrast QR Matrix
     const qrSize = 180;
     const startX = 90;
     const startY = 170;
@@ -599,7 +626,6 @@ export default function TraceFrostedDaylightApp() {
       }
     }
 
-    // Bounty Pill
     ctx.fillStyle = '#0f172a';
     ctx.beginPath();
     ctx.roundRect(75, 385, 210, 44, 22);
@@ -632,16 +658,19 @@ export default function TraceFrostedDaylightApp() {
 
       {/* TOP FROSTED CAPSULE BAR */}
       <header className="fixed top-4 left-4 right-4 z-20 flex items-center justify-between pointer-events-none">
-        {/* Brand Pill */}
-        <div className="pointer-events-auto flex items-center gap-3 px-4 py-2.5 rounded-full bg-white/80 backdrop-blur-2xl border border-white/90 shadow-[0_8px_30px_rgb(15,23,42,0.08)]">
+        {/* Brand + Standard Tier Badge */}
+        <div className="pointer-events-auto flex items-center gap-2.5 px-4 py-2 rounded-full bg-white/80 backdrop-blur-2xl border border-white/90 shadow-[0_8px_30px_rgb(15,23,42,0.08)]">
           <div className="w-8 h-8 rounded-full bg-slate-900 text-white flex items-center justify-center shadow-sm">
             <Radar className="w-4 h-4 animate-pulse" />
           </div>
           <span className="font-mono font-bold tracking-widest text-sm text-slate-900">TRACE</span>
-          <span className="w-2 h-2 rounded-full bg-emerald-500" title="SRID 4326 Live" />
+          <span className="px-2 py-0.5 rounded-full bg-slate-900/10 font-mono text-[10px] font-bold text-slate-700">
+            STD
+          </span>
+          <span className="w-2 h-2 rounded-full bg-emerald-500" title="National Grid SRID 4326 Live" />
         </div>
 
-        {/* XP & Quick Locate Pill */}
+        {/* Right System Controls: Toast, XP, Notifications, Locate, Avatar */}
         <div className="pointer-events-auto flex items-center gap-2">
           {toastMsg && (
             <div className="px-3.5 py-1.5 rounded-full bg-slate-900 text-white font-mono text-xs font-semibold shadow-lg animate-bounce">
@@ -649,15 +678,70 @@ export default function TraceFrostedDaylightApp() {
             </div>
           )}
 
-          <div
-            onClick={() => triggerXpReward(25, 'Scout Check-in')}
-            title="Scout XP"
-            className="cursor-pointer flex items-center gap-2 px-4 py-2.5 rounded-full bg-white/80 backdrop-blur-2xl border border-white/90 shadow-[0_8px_30px_rgb(15,23,42,0.08)] hover:bg-white transition"
+          {/* Scout XP Pill */}
+          <button
+            onClick={() => setMode('profile')}
+            title="Scout XP & Rewards"
+            className="flex items-center gap-2 px-3.5 py-2 rounded-full bg-white/80 backdrop-blur-2xl border border-white/90 shadow-[0_8px_30px_rgb(15,23,42,0.08)] hover:bg-white transition"
           >
             <Award className="w-4 h-4 text-amber-500" />
             <span className="font-mono font-bold text-xs text-slate-900">{xp.toLocaleString()}</span>
+          </button>
+
+          {/* Notification Bell */}
+          <div className="relative">
+            <button
+              onClick={() => setShowNotifications((n) => !n)}
+              title="Active Alerts"
+              className="w-10 h-10 rounded-full bg-white/80 backdrop-blur-2xl border border-white/90 shadow-[0_8px_30px_rgb(15,23,42,0.08)] flex items-center justify-center text-slate-700 hover:text-slate-950 hover:bg-white transition relative"
+            >
+              <Bell className="w-4 h-4" />
+              <span className="absolute top-2 right-2.5 w-2 h-2 rounded-full bg-rose-500" />
+            </button>
+
+            {showNotifications && (
+              <div className="absolute right-0 mt-2 w-72 rounded-3xl bg-white/90 backdrop-blur-2xl border border-white/95 shadow-[0_20px_50px_rgb(15,23,42,0.15)] p-3 flex flex-col gap-2">
+                <div className="flex items-center justify-between px-2 py-1">
+                  <span className="font-mono text-[10px] font-bold tracking-widest text-slate-400">ALERTS</span>
+                  <span className="font-mono text-[10px] font-bold text-emerald-600">LIVE</span>
+                </div>
+                <div
+                  onClick={() => {
+                    setMode('loser');
+                    setShowNotifications(false);
+                  }}
+                  className="cursor-pointer p-2.5 rounded-2xl bg-slate-100/80 hover:bg-slate-200/70 transition flex items-center gap-3"
+                >
+                  <div className="w-8 h-8 rounded-xl bg-rose-500 text-white flex items-center justify-center shrink-0">
+                    <Radar className="w-4 h-4" />
+                  </div>
+                  <div className="flex-1 min-w-0">
+                    <div className="font-mono text-xs font-bold text-slate-900 truncate">NODE-05 · 55% DROP</div>
+                    <div className="font-mono text-[10px] text-slate-500">Samyan Mitrtown · 12m ago</div>
+                  </div>
+                  <ChevronRight className="w-4 h-4 text-slate-400" />
+                </div>
+                <div
+                  onClick={() => {
+                    setMode('vault');
+                    setShowNotifications(false);
+                  }}
+                  className="cursor-pointer p-2.5 rounded-2xl bg-slate-100/80 hover:bg-slate-200/70 transition flex items-center gap-3"
+                >
+                  <div className="w-8 h-8 rounded-xl bg-emerald-600 text-white flex items-center justify-center shrink-0">
+                    <ShieldCheck className="w-4 h-4" />
+                  </div>
+                  <div className="flex-1 min-w-0">
+                    <div className="font-mono text-xs font-bold text-slate-900 truncate">VAULT MATCH (&lt;30m)</div>
+                    <div className="font-mono text-[10px] text-slate-500">Blue Visa Card · Verified</div>
+                  </div>
+                  <ChevronRight className="w-4 h-4 text-slate-400" />
+                </div>
+              </div>
+            )}
           </div>
 
+          {/* Recenter Map */}
           <button
             onClick={() => {
               mapRef.current?.flyTo({ center: [100.5322, 13.7375], zoom: 15.8, duration: 700 });
@@ -667,13 +751,25 @@ export default function TraceFrostedDaylightApp() {
           >
             <Navigation className="w-4 h-4" />
           </button>
+
+          {/* Quick User Profile Avatar */}
+          <button
+            onClick={() => setMode('profile')}
+            title="User Profile & Wallet"
+            className={`w-10 h-10 rounded-full font-mono text-xs font-bold flex items-center justify-center border transition shadow-[0_8px_30px_rgb(15,23,42,0.08)] ${mode === 'profile'
+                ? 'bg-slate-900 text-white border-slate-900'
+                : 'bg-white/85 text-slate-900 border-white hover:bg-white'
+              }`}
+          >
+            PS
+          </button>
         </div>
       </header>
 
-      {/* LEFT FLOATING ICON DOCK (4 PILLARS — ICON ONLY) */}
-      <nav className="fixed left-4 top-1/2 -translate-y-1/2 z-20 flex flex-col gap-2.5 p-2 rounded-full bg-white/80 backdrop-blur-2xl border border-white/90 shadow-[0_12px_36px_rgb(15,23,42,0.10)]">
+      {/* LEFT FLOATING ICON DOCK (4 CORE PILLARS + PROFILE & SETTINGS BASE SYSTEM) */}
+      <nav className="fixed left-4 top-1/2 -translate-y-1/2 z-20 flex flex-col gap-2 p-2 rounded-full bg-white/80 backdrop-blur-2xl border border-white/90 shadow-[0_12px_36px_rgb(15,23,42,0.10)]">
         {[
-          { id: 'loser', icon: User, label: 'IMU Drop Radar' },
+          { id: 'loser', icon: Crosshair, label: 'IMU Drop Radar' },
           { id: 'pet', icon: Dog, label: 'Pet Radiance' },
           { id: 'vault', icon: ShieldAlert, label: 'AI Forensic Vault' },
           { id: 'qr', icon: QrCode, label: 'Samaritan QR Shield' },
@@ -685,9 +781,33 @@ export default function TraceFrostedDaylightApp() {
               key={item.id}
               onClick={() => setMode(item.id as Mode)}
               title={item.label}
-              className={`w-12 h-12 rounded-full flex items-center justify-center transition-all duration-200 ${active
-                ? 'bg-slate-900 text-white shadow-md scale-105'
-                : 'text-slate-500 hover:text-slate-900 hover:bg-slate-100/80'
+              className={`w-11 h-11 rounded-full flex items-center justify-center transition-all duration-200 ${active
+                  ? 'bg-slate-900 text-white shadow-md scale-105'
+                  : 'text-slate-500 hover:text-slate-900 hover:bg-slate-100/80'
+                }`}
+            >
+              <Icon className="w-5 h-5" />
+            </button>
+          );
+        })}
+
+        {/* Divider for Base System */}
+        <div className="h-[1px] w-6 mx-auto bg-slate-200 my-0.5" />
+
+        {[
+          { id: 'profile', icon: User, label: 'User Profile & Assets' },
+          { id: 'settings', icon: Settings, label: 'Standard System Settings' },
+        ].map((item) => {
+          const Icon = item.icon;
+          const active = mode === item.id;
+          return (
+            <button
+              key={item.id}
+              onClick={() => setMode(item.id as Mode)}
+              title={item.label}
+              className={`w-11 h-11 rounded-full flex items-center justify-center transition-all duration-200 ${active
+                  ? 'bg-slate-900 text-white shadow-md scale-105'
+                  : 'text-slate-500 hover:text-slate-900 hover:bg-slate-100/80'
                 }`}
             >
               <Icon className="w-5 h-5" />
@@ -699,10 +819,8 @@ export default function TraceFrostedDaylightApp() {
       {/* MODE 1: LOSER VIEW — COMPACT FROSTED HUD */}
       {mode === 'loser' && (
         <aside className="fixed bottom-6 right-4 left-20 md:left-auto md:w-80 z-20 flex flex-col gap-3">
-          {/* Score & Action Capsule */}
           <div className="p-5 rounded-3xl bg-white/85 backdrop-blur-2xl border border-white/95 shadow-[0_16px_40px_rgb(15,23,42,0.10)]">
             <div className="flex items-center justify-between mb-4">
-              {/* Circular Score Gauge */}
               <div className="flex items-center gap-3.5">
                 <div className="relative w-16 h-16 rounded-full bg-slate-100 flex items-center justify-center border border-slate-200/80">
                   <svg className="absolute inset-0 w-full h-full -rotate-90" viewBox="0 0 36 36">
@@ -735,24 +853,22 @@ export default function TraceFrostedDaylightApp() {
                   </div>
                   {radarMatches !== null && (
                     <div className="mt-1 inline-flex items-center gap-1 px-2 py-0.5 rounded-full bg-emerald-500/15 text-emerald-700 font-mono text-[11px] font-bold">
-                      <CheckCircle2 className="w-3 h-3" /> {radarMatches} MATCH (&lt;30m)
+                      <CheckCircle2 className="w-3 h-3" /> {radarMatches} MATCH (&lt;{settings.alertRadiusMeters}m)
                     </div>
                   )}
                 </div>
               </div>
 
-              {/* 30m PostGIS Radar Trigger Icon */}
               <button
                 onClick={handlePostgisRadarScan}
                 disabled={isScanningRadar}
-                title="PostGIS 30m Radar Scan"
+                title="PostGIS Radar Scan"
                 className="w-12 h-12 rounded-2xl bg-slate-900 text-white flex items-center justify-center shadow-lg hover:bg-slate-800 active:scale-95 transition"
               >
                 <Radar className={`w-5 h-5 ${isScanningRadar ? 'animate-spin' : ''}`} />
               </button>
             </div>
 
-            {/* 4 Icon-Only Micro Tools */}
             <div className="grid grid-cols-4 gap-2 pt-3 border-t border-slate-200/60">
               <button
                 onClick={() => setIsCustomPinning((p) => !p)}
@@ -794,7 +910,6 @@ export default function TraceFrostedDaylightApp() {
               </button>
             </div>
 
-            {/* Node Pill Strip */}
             <div className="flex items-center gap-1.5 overflow-x-auto pt-3 mt-3 border-t border-slate-200/60 no-scrollbar">
               {dropNodes.map((n) => {
                 const s = Math.round(n.dropProbability * 100);
@@ -807,10 +922,10 @@ export default function TraceFrostedDaylightApp() {
                       mapRef.current?.flyTo({ center: [n.lng, n.lat], zoom: 16.3, duration: 500 });
                     }}
                     className={`px-2.5 py-1 rounded-full font-mono text-xs font-bold shrink-0 transition ${isSel
-                      ? 'bg-slate-900 text-white'
-                      : s >= 50
-                        ? 'bg-rose-500/15 text-rose-700'
-                        : 'bg-slate-100 text-slate-600'
+                        ? 'bg-slate-900 text-white'
+                        : s >= 50
+                          ? 'bg-rose-500/15 text-rose-700'
+                          : 'bg-slate-100 text-slate-600'
                       }`}
                   >
                     {s}%
@@ -822,11 +937,10 @@ export default function TraceFrostedDaylightApp() {
         </aside>
       )}
 
-      {/* MODE 2: PET RADIANCE VIEW — ICON-FIRST CELLULAR AUTOMATA HUD */}
+      {/* MODE 2: PET RADIANCE VIEW */}
       {mode === 'pet' && (
         <aside className="fixed bottom-6 right-4 left-20 md:left-auto md:w-80 z-20">
           <div className="p-5 rounded-3xl bg-white/85 backdrop-blur-2xl border border-white/95 shadow-[0_16px_40px_rgb(15,23,42,0.10)] flex flex-col gap-4">
-            {/* Top Row: Species Behavior Icons + Weather Toggle */}
             <div className="flex items-center justify-between gap-2">
               <div className="flex items-center gap-1.5 bg-slate-100/90 p-1 rounded-2xl">
                 <button
@@ -855,7 +969,6 @@ export default function TraceFrostedDaylightApp() {
                 </button>
               </div>
 
-              {/* Rain / Storm Factor Icon */}
               <button
                 onClick={() => setIsRaining((r) => !r)}
                 title="Toggle Rain Shelter Seeking"
@@ -866,7 +979,6 @@ export default function TraceFrostedDaylightApp() {
               </button>
             </div>
 
-            {/* Time Slider */}
             <div className="flex items-center gap-3">
               <span className="font-mono text-xs font-bold text-slate-500 w-14">{elapsedMinutes}m</span>
               <input
@@ -880,7 +992,6 @@ export default function TraceFrostedDaylightApp() {
               />
             </div>
 
-            {/* Map Click Mode Switcher (Origin vs Sighting) */}
             <div className="grid grid-cols-3 gap-2 pt-2 border-t border-slate-200/60">
               <button
                 onClick={() => setPetClickMode('origin')}
@@ -910,11 +1021,10 @@ export default function TraceFrostedDaylightApp() {
         </aside>
       )}
 
-      {/* MODE 3: AI FORENSIC VAULT — FLOATING GLASS MODAL */}
+      {/* MODE 3: AI FORENSIC VAULT */}
       {mode === 'vault' && (
         <div className="fixed inset-0 z-10 flex items-center justify-center p-4 pl-20 pointer-events-none">
           <div className="pointer-events-auto w-full max-w-3xl rounded-3xl bg-white/85 backdrop-blur-2xl border border-white/95 shadow-[0_24px_60px_rgb(15,23,42,0.14)] p-5 md:p-6 grid grid-cols-1 md:grid-cols-12 gap-5 max-h-[85vh] overflow-y-auto">
-            {/* Left Column: Image & Redaction Canvas */}
             <div className="md:col-span-7 flex flex-col items-center justify-center bg-slate-950/95 rounded-2xl p-3 min-h-[260px] relative overflow-hidden">
               {!imageSrc ? (
                 <button
@@ -952,7 +1062,6 @@ export default function TraceFrostedDaylightApp() {
               )}
             </div>
 
-            {/* Right Column: Minimal Tags & Challenge Unlock */}
             <div className="md:col-span-5 flex flex-col justify-between gap-4">
               <div className="flex flex-col gap-3">
                 <div className="flex items-center justify-between">
@@ -974,7 +1083,6 @@ export default function TraceFrostedDaylightApp() {
                   </div>
                 )}
 
-                {/* Public Macro Pills */}
                 {forensicData?.public_payload && (
                   <div className="flex flex-wrap gap-1.5">
                     {forensicData.public_payload.category && (
@@ -995,7 +1103,6 @@ export default function TraceFrostedDaylightApp() {
                   </div>
                 )}
 
-                {/* Challenge Prompt Box */}
                 {(forensicData?.vault_secret || forensicData?.challenge_prompt) && (
                   <div className="p-3.5 rounded-2xl bg-slate-100/90 border border-slate-200/80 flex flex-col gap-2">
                     <div className="flex items-center justify-between">
@@ -1023,7 +1130,6 @@ export default function TraceFrostedDaylightApp() {
                 )}
               </div>
 
-              {/* Claim Input & Handoff Status */}
               {forensicData && (
                 <div className="flex flex-col gap-2">
                   <div className="flex items-center gap-2">
@@ -1046,8 +1152,8 @@ export default function TraceFrostedDaylightApp() {
                   {claimResult && (
                     <div
                       className={`p-3 rounded-2xl font-mono text-xs flex items-center justify-between ${claimResult.is_verified
-                        ? 'bg-emerald-500/15 text-emerald-800'
-                        : 'bg-rose-500/15 text-rose-800'
+                          ? 'bg-emerald-500/15 text-emerald-800'
+                          : 'bg-rose-500/15 text-rose-800'
                         }`}
                     >
                       <span>
@@ -1065,7 +1171,7 @@ export default function TraceFrostedDaylightApp() {
         </div>
       )}
 
-      {/* MODE 4: SAMARITAN SHIELD QR GENERATOR — FROSTED STUDIO */}
+      {/* MODE 4: SAMARITAN SHIELD QR GENERATOR */}
       {mode === 'qr' && (
         <div className="fixed inset-0 z-10 flex items-center justify-center p-4 pl-20 pointer-events-none">
           <div className="pointer-events-auto w-full max-w-xl rounded-3xl bg-white/85 backdrop-blur-2xl border border-white/95 shadow-[0_24px_60px_rgb(15,23,42,0.14)] p-6 grid grid-cols-1 md:grid-cols-2 gap-6 items-center">
@@ -1114,6 +1220,242 @@ export default function TraceFrostedDaylightApp() {
                 >
                   <ExternalLink className="w-4 h-4" />
                 </a>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* MODE 5: USER PROFILE, WALLET & REGISTERED ASSETS (STANDARD BASE SYSTEM) */}
+      {mode === 'profile' && (
+        <div className="fixed inset-0 z-10 flex items-center justify-center p-4 pl-20 pointer-events-none">
+          <div className="pointer-events-auto w-full max-w-2xl rounded-3xl bg-white/85 backdrop-blur-2xl border border-white/95 shadow-[0_24px_60px_rgb(15,23,42,0.14)] p-6 flex flex-col gap-5 max-h-[85vh] overflow-y-auto">
+            {/* Top Identity Row */}
+            <div className="flex items-center justify-between border-b border-slate-200/70 pb-4">
+              <div className="flex items-center gap-3.5">
+                <div className="w-14 h-14 rounded-2xl bg-slate-900 text-white font-mono text-lg font-bold flex items-center justify-center shadow-md">
+                  PS
+                </div>
+                <div>
+                  <div className="flex items-center gap-2">
+                    <span className="font-mono font-bold text-base text-slate-900">{userProfile.name}</span>
+                    <span className="px-2 py-0.5 rounded-full bg-emerald-500/15 text-emerald-700 font-mono text-[10px] font-bold flex items-center gap-1">
+                      <ShieldCheck className="w-3 h-3" /> {userProfile.trustScore}%
+                    </span>
+                  </div>
+                  <div className="font-mono text-xs text-slate-400 mt-0.5">
+                    ID: {userProfile.id} · {userProfile.rank}
+                  </div>
+                </div>
+              </div>
+
+              {/* PromptPay Bounty Escrow Mini Card */}
+              <div className="px-4 py-2.5 rounded-2xl bg-slate-900 text-white flex items-center gap-3">
+                <Wallet className="w-5 h-5 text-emerald-400" />
+                <div>
+                  <div className="font-mono text-[10px] text-slate-400">ESCROW</div>
+                  <div className="font-mono text-sm font-bold">฿{userProfile.escrowBalance.toLocaleString()}</div>
+                </div>
+              </div>
+            </div>
+
+            {/* 3 Minimal KPI Bento Boxes */}
+            <div className="grid grid-cols-3 gap-3">
+              <div className="p-3.5 rounded-2xl bg-slate-100/90 flex items-center gap-3">
+                <Award className="w-5 h-5 text-amber-500 shrink-0" />
+                <div>
+                  <div className="font-mono text-[10px] text-slate-400">SCOUT XP</div>
+                  <div className="font-mono text-sm font-bold text-slate-900">{xp.toLocaleString()}</div>
+                </div>
+              </div>
+              <div className="p-3.5 rounded-2xl bg-slate-100/90 flex items-center gap-3">
+                <CheckCircle2 className="w-5 h-5 text-emerald-600 shrink-0" />
+                <div>
+                  <div className="font-mono text-[10px] text-slate-400">RECOVERED</div>
+                  <div className="font-mono text-sm font-bold text-slate-900">{userProfile.rescuedCount}</div>
+                </div>
+              </div>
+              <div className="p-3.5 rounded-2xl bg-slate-100/90 flex items-center gap-3">
+                <QrCode className="w-5 h-5 text-sky-600 shrink-0" />
+                <div>
+                  <div className="font-mono text-[10px] text-slate-400">SHIELDS</div>
+                  <div className="font-mono text-sm font-bold text-slate-900">{registeredAssets.length}</div>
+                </div>
+              </div>
+            </div>
+
+            {/* Protected Assets List (Icon-Driven) */}
+            <div className="flex flex-col gap-2.5">
+              <div className="flex items-center justify-between">
+                <span className="font-mono text-xs font-bold tracking-widest text-slate-400">REGISTERED SHIELDS</span>
+                <button
+                  onClick={() => setMode('qr')}
+                  className="px-2.5 py-1 rounded-full bg-slate-900 text-white font-mono text-[11px] font-bold flex items-center gap-1 hover:bg-slate-800 transition"
+                >
+                  <Plus className="w-3 h-3" /> NEW
+                </button>
+              </div>
+
+              {registeredAssets.map((asset, idx) => {
+                const AssetIcon =
+                  asset.type === 'phone' ? Smartphone : asset.type === 'card' ? CreditCard : Key;
+                return (
+                  <div
+                    key={asset.id}
+                    className="p-3 rounded-2xl bg-slate-100/90 border border-slate-200/60 flex items-center justify-between"
+                  >
+                    <div className="flex items-center gap-3">
+                      <div className="w-10 h-10 rounded-xl bg-white flex items-center justify-center text-slate-800 shadow-sm">
+                        <AssetIcon className="w-5 h-5" />
+                      </div>
+                      <div>
+                        <div className="font-mono text-xs font-bold text-slate-900">{asset.label}</div>
+                        <div className="font-mono text-[11px] text-slate-400">
+                          {asset.id} · {asset.bounty}
+                        </div>
+                      </div>
+                    </div>
+
+                    <button
+                      onClick={() => {
+                        const updated = [...registeredAssets];
+                        updated[idx].active = !updated[idx].active;
+                        setRegisteredAssets(updated);
+                      }}
+                      className={`px-3 py-1 rounded-full font-mono text-[11px] font-bold transition ${asset.active
+                          ? 'bg-emerald-500/15 text-emerald-700'
+                          : 'bg-slate-200 text-slate-500'
+                        }`}
+                    >
+                      {asset.active ? 'ARMED' : 'PAUSED'}
+                    </button>
+                  </div>
+                );
+              })}
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* MODE 6: STANDARD SYSTEM SETTINGS (PRIVACY, RADAR & TRANSIT) */}
+      {mode === 'settings' && (
+        <div className="fixed inset-0 z-10 flex items-center justify-center p-4 pl-20 pointer-events-none">
+          <div className="pointer-events-auto w-full max-w-lg rounded-3xl bg-white/85 backdrop-blur-2xl border border-white/95 shadow-[0_24px_60px_rgb(15,23,42,0.14)] p-6 flex flex-col gap-4">
+            <div className="flex items-center justify-between border-b border-slate-200/70 pb-3">
+              <div className="flex items-center gap-2.5">
+                <Settings className="w-5 h-5 text-slate-900" />
+                <span className="font-mono font-bold text-sm tracking-widest text-slate-900">
+                  SYSTEM // STANDARD
+                </span>
+              </div>
+              <span className="font-mono text-xs text-slate-400">v2.4 TH</span>
+            </div>
+
+            {/* Icon-Driven Toggle Rows */}
+            <div className="flex flex-col gap-2.5">
+              {/* PDPA 48h Local Buffer */}
+              <div className="p-3.5 rounded-2xl bg-slate-100/90 flex items-center justify-between">
+                <div className="flex items-center gap-3">
+                  <div className="w-10 h-10 rounded-xl bg-white flex items-center justify-center text-slate-800 shadow-sm">
+                    <ShieldCheck className="w-5 h-5" />
+                  </div>
+                  <div>
+                    <div className="font-mono text-xs font-bold text-slate-900">48H LOCAL PDPA BUFFER</div>
+                    <div className="font-mono text-[11px] text-slate-500">On-device encrypted IMU log</div>
+                  </div>
+                </div>
+                <button
+                  onClick={() => setSettings((s) => ({ ...s, pdpaLocalBuffer: !s.pdpaLocalBuffer }))}
+                  className={`w-12 h-7 rounded-full p-1 transition flex items-center ${settings.pdpaLocalBuffer ? 'bg-slate-900 justify-end' : 'bg-slate-300 justify-start'
+                    }`}
+                >
+                  <span className="w-5 h-5 rounded-full bg-white shadow-sm" />
+                </button>
+              </div>
+
+              {/* Public Transit Auto-Tag (BTS/MRT/Bus) */}
+              <div className="p-3.5 rounded-2xl bg-slate-100/90 flex items-center justify-between">
+                <div className="flex items-center gap-3">
+                  <div className="w-10 h-10 rounded-xl bg-white flex items-center justify-center text-slate-800 shadow-sm">
+                    <Train className="w-5 h-5" />
+                  </div>
+                  <div>
+                    <div className="font-mono text-xs font-bold text-slate-900">TRANSIT GHOST VECTOR</div>
+                    <div className="font-mono text-[11px] text-slate-500">BTS / MRT / Bus alighting spike</div>
+                  </div>
+                </div>
+                <button
+                  onClick={() => setSettings((s) => ({ ...s, transitAutoLink: !s.transitAutoLink }))}
+                  className={`w-12 h-7 rounded-full p-1 transition flex items-center ${settings.transitAutoLink ? 'bg-slate-900 justify-end' : 'bg-slate-300 justify-start'
+                    }`}
+                >
+                  <span className="w-5 h-5 rounded-full bg-white shadow-sm" />
+                </button>
+              </div>
+
+              {/* Low-Power IMU Polling */}
+              <div className="p-3.5 rounded-2xl bg-slate-100/90 flex items-center justify-between">
+                <div className="flex items-center gap-3">
+                  <div className="w-10 h-10 rounded-xl bg-white flex items-center justify-center text-slate-800 shadow-sm">
+                    <BatteryCharging className="w-5 h-5" />
+                  </div>
+                  <div>
+                    <div className="font-mono text-xs font-bold text-slate-900">ECO SENSOR SAMPLE</div>
+                    <div className="font-mono text-[11px] text-slate-500">Adaptive 15Hz IMU saver</div>
+                  </div>
+                </div>
+                <button
+                  onClick={() => setSettings((s) => ({ ...s, lowPowerImu: !s.lowPowerImu }))}
+                  className={`w-12 h-7 rounded-full p-1 transition flex items-center ${settings.lowPowerImu ? 'bg-slate-900 justify-end' : 'bg-slate-300 justify-start'
+                    }`}
+                >
+                  <span className="w-5 h-5 rounded-full bg-white shadow-sm" />
+                </button>
+              </div>
+
+              {/* Spatial Alert Radius Selector */}
+              <div className="p-3.5 rounded-2xl bg-slate-100/90 flex items-center justify-between">
+                <div className="flex items-center gap-3">
+                  <div className="w-10 h-10 rounded-xl bg-white flex items-center justify-center text-slate-800 shadow-sm">
+                    <Radar className="w-5 h-5" />
+                  </div>
+                  <div>
+                    <div className="font-mono text-xs font-bold text-slate-900">POSTGIS SCAN RADIUS</div>
+                    <div className="font-mono text-[11px] text-slate-500">Spatial intersection threshold</div>
+                  </div>
+                </div>
+                <div className="flex items-center gap-1 bg-white p-1 rounded-xl border border-slate-200">
+                  {[30, 50, 100].map((r) => (
+                    <button
+                      key={r}
+                      onClick={() => setSettings((s) => ({ ...s, alertRadiusMeters: r }))}
+                      className={`px-2 py-1 rounded-lg font-mono text-[11px] font-bold transition ${settings.alertRadiusMeters === r ? 'bg-slate-900 text-white' : 'text-slate-500'
+                        }`}
+                    >
+                      {r}m
+                    </button>
+                  ))}
+                </div>
+              </div>
+
+              {/* Language & Clear Local Cache */}
+              <div className="grid grid-cols-2 gap-2.5 pt-2">
+                <button
+                  onClick={() => setSettings((s) => ({ ...s, lang: s.lang === 'TH' ? 'EN' : 'TH' }))}
+                  className="h-11 rounded-2xl bg-slate-100 hover:bg-slate-200/80 font-mono text-xs font-bold text-slate-800 flex items-center justify-center gap-2 transition"
+                >
+                  <Globe className="w-4 h-4" /> LANG: {settings.lang}
+                </button>
+                <button
+                  onClick={() => {
+                    setTelemetry(DEMO_TELEMETRY);
+                    setSightings([]);
+                    triggerXpReward(10, 'Buffer Flushed');
+                  }}
+                  className="h-11 rounded-2xl bg-rose-500/10 hover:bg-rose-500/20 font-mono text-xs font-bold text-rose-700 flex items-center justify-center gap-2 transition"
+                >
+                  <Trash2 className="w-4 h-4" /> FLUSH 48H LOG
+                </button>
               </div>
             </div>
           </div>
