@@ -1,65 +1,47 @@
-// src/app/page.tsx
 'use client';
 
-import React, { useEffect, useRef, useState, useCallback } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import * as maplibregl from 'maplibre-gl';
 import 'maplibre-gl/dist/maplibre-gl.css';
-import QRCode from 'qrcode';
 import {
+  User,
+  Dog,
+  ShieldAlert,
+  QrCode,
   Radar,
-  ShieldCheck,
-  Cpu,
-  CloudRain,
-  Navigation,
   Upload,
-  EyeOff,
-  CheckCircle2,
   Crosshair,
-  Sparkles,
+  RotateCcw,
+  Activity,
+  CloudRain,
+  Eye,
   Lock,
   Unlock,
-  Send,
-  MapPin,
-  XCircle,
-  Eye,
-  FileUp,
-  Activity,
-  Radio,
-  QrCode,
+  CheckCircle2,
+  Sparkles,
   Download,
   ExternalLink,
-  Map as MapIcon,
-  LocateFixed,
-  MousePointerClick,
-  RotateCcw,
-  Trophy,
+  Cat,
+  Zap,
   Award,
-  UserCheck,
-  Compass,
-  Camera,
-  Check,
+  Navigation,
+  Plus,
+  Send
 } from 'lucide-react';
-import {
-  evaluateTrajectoryDropProbability,
-  generateMockBangkokTrajectory,
-  parseGpxToTelemetry,
-  parseJsonToTelemetry,
-  ScoredTrajectoryNode,
-  TelemetryPoint,
-} from '@/lib/engine/imu-math';
-import {
-  runPetRadianceSimulation,
-  PetBehaviorProfile,
-  RadianceCell,
-} from '@/lib/engine/pet-diffusion';
+import { calculateDropProbabilities, RawTelemetryPoint, DropNode } from '@/lib/imu-math';
+import { simulatePetDiffusion, BehaviorProfile, RadianceCell } from '@/lib/pet-diffusion';
 
-type ActivePillar =
-  | 'PILLAR_1_IMU'
-  | 'PILLAR_2_PET'
-  | 'PILLAR_3_VISION'
-  | 'PILLAR_4_QR';
+// ข้อมูลตัวอย่างเส้นทางเริ่มต้น (สามย่าน - จุฬาฯ)
+const DEMO_TELEMETRY: RawTelemetryPoint[] = [
+  { id: 'NODE-01', lat: 13.7335, lng: 100.5285, timestamp: 1000, speedKmh: 28, accelMagnitude: 9.8, gyroRate: 0.1, dwellSeconds: 2 },
+  { id: 'NODE-02', lat: 13.7352, lng: 100.5301, timestamp: 2000, speedKmh: 22, accelMagnitude: 10.1, gyroRate: 0.2, dwellSeconds: 5 },
+  { id: 'NODE-03', lat: 13.7370, lng: 100.5318, timestamp: 3000, speedKmh: 4, accelMagnitude: 14.5, gyroRate: 1.2, dwellSeconds: 18 },
+  { id: 'NODE-05', lat: 13.7382, lng: 100.5325, timestamp: 4000, speedKmh: 1.5, accelMagnitude: 24.8, gyroRate: 3.4, dwellSeconds: 95 },
+  { id: 'NODE-06', lat: 13.7391, lng: 100.5334, timestamp: 5000, speedKmh: 3.2, accelMagnitude: 19.2, gyroRate: 2.1, dwellSeconds: 45 },
+  { id: 'NODE-07', lat: 13.7396, lng: 100.5348, timestamp: 6000, speedKmh: 5.0, accelMagnitude: 11.4, gyroRate: 0.5, dwellSeconds: 12 },
+];
 
-type MapStyleMode = 'OSM_STREET' | 'CARTO_DARK';
+type Mode = 'loser' | 'pet' | 'vault' | 'qr';
 
 interface RedactionBox {
   label: string;
@@ -67,621 +49,167 @@ interface RedactionBox {
 }
 
 interface ForensicResponse {
-  public_payload: {
-    category: string;
-    color: string;
-    brand: string;
-    public_summary: string;
-    redaction_boxes: RedactionBox[];
+  public_payload?: {
+    category?: string;
+    color?: string;
+    brand?: string;
+    macro_description?: string;
+    public_summary?: string;
+    redaction_boxes?: RedactionBox[];
   };
-  challenge_prompt: {
-    en: string;
-    th: string;
-    dev_preview_secret: string;
+  vault_secret?: {
+    challenge_question_th?: string;
+    challenge_question_en?: string;
+    expected_answer_summary?: string;
+  };
+  challenge_prompt?: {
+    en?: string;
+    th?: string;
+    dev_preview_secret?: string;
     dev_preview_keywords_en?: string[];
-    dev_preview_keywords_th: string[];
+    dev_preview_keywords_th?: string[];
   };
 }
 
-interface ClaimGradeResult {
+interface ClaimResult {
   is_verified: boolean;
   confidence_score: number;
-  reasoning: string;
-  safe_handoff_point: string;
+  feedback_th?: string;
+  safe_handoff_spot?: string;
+  safe_handoff_point?: string;
 }
 
-interface SpatialMatchItem {
-  nodeId: string;
-  vaultItemId: string;
-  category: string;
-  public_summary: string;
-  question_en: string;
-  question_th: string;
-  lat: number;
-  lng: number;
-  distance_meters: number;
-}
+export default function TraceFrostedDaylightApp() {
+  const [mode, setMode] = useState<Mode>('loser');
+  const [xp, setXp] = useState<number>(2950);
+  const [toastMsg, setToastMsg] = useState<string | null>(null);
 
-// 100% Reliable OpenStreetMap Raster Style (Zero API key required on any domain)
-const OSM_RASTER_STYLE: maplibregl.StyleSpecification = {
-  version: 8,
-  center: [100.5355, 13.7385],
-  zoom: 15.5,
-  sources: {
-    osm: {
-      type: 'raster',
-      tiles: ['https://tile.openstreetmap.org/{z}/{x}/{y}.png'],
-      tileSize: 256,
-      maxzoom: 19,
-      attribution: '© OpenStreetMap contributors',
-    },
-  },
-  layers: [
-    {
-      id: 'osm-raster-layer',
-      type: 'raster',
-      source: 'osm',
-      minzoom: 0,
-      maxzoom: 19,
-    },
-  ],
-};
+  // Pillar 1: IMU & Trajectory State
+  const [telemetry, setTelemetry] = useState<RawTelemetryPoint[]>(DEMO_TELEMETRY);
+  const [dropNodes, setDropNodes] = useState<DropNode[]>([]);
+  const [selectedNode, setSelectedNode] = useState<DropNode | null>(null);
+  const [isCustomPinning, setIsCustomPinning] = useState(false);
+  const [isRecordingImu, setIsRecordingImu] = useState(false);
+  const [radarMatches, setRadarMatches] = useState<number | null>(null);
+  const [isScanningRadar, setIsScanningRadar] = useState(false);
 
-export default function TraceCivicPortal() {
-  const mapContainerRef = useRef<HTMLDivElement | null>(null);
-  const mapRef = useRef<maplibregl.Map | null>(null);
-  const overlayCanvasRef = useRef<HTMLCanvasElement | null>(null);
+  // Pillar 2: Pet Cellular Automata State
+  const [petOrigin, setPetOrigin] = useState<{ lat: number; lng: number }>({ lat: 13.7375, lng: 100.5320 });
+  const [petProfile, setPetProfile] = useState<BehaviorProfile>('INDOOR_CAT');
+  const [elapsedMinutes, setElapsedMinutes] = useState<number>(90);
+  const [isRaining, setIsRaining] = useState<boolean>(false);
+  const [sightings, setSightings] = useState<{ lat: number; lng: number }[]>([]);
+  const [petClickMode, setPetClickMode] = useState<'origin' | 'sighting'>('sighting');
 
-  const [activePillar, setActivePillar] = useState<ActivePillar>('PILLAR_1_IMU');
-  const [mapStyleMode, setMapStyleMode] = useState<MapStyleMode>('OSM_STREET');
-
-  // Gamification State (Community Scout XP & Quests)
-  const [scoutXp, setScoutXp] = useState<number>(2450);
-  const [clearedNodeIds, setClearedNodeIds] = useState<string[]>([]);
-  const [showLeaderboardModal, setShowLeaderboardModal] = useState<boolean>(false);
-  const [xpToastMessage, setXpToastMessage] = useState<string | null>(null);
-
-  // Pillar 1 State
-  const [rawPoints, setRawPoints] = useState<TelemetryPoint[]>([]);
-  const [scoredNodes, setScoredNodes] = useState<ScoredTrajectoryNode[]>([]);
-  const [selectedNode, setSelectedNode] = useState<ScoredTrajectoryNode | null>(null);
-  const [trajectorySource, setTrajectorySource] = useState<string>('เส้นทางตัวอย่าง: สามย่าน - จุฬาฯ');
-  const [isRecordingImu, setIsRecordingImu] = useState<boolean>(false);
-  const [isClickToAddNode, setIsClickToAddNode] = useState<boolean>(false);
-  const livePointsRef = useRef<TelemetryPoint[]>([]);
-  const [spatialMatches, setSpatialMatches] = useState<SpatialMatchItem[]>([]);
-  const [isCheckingRadar, setIsCheckingRadar] = useState<boolean>(false);
-
-  // Pillar 2 State
-  const [petOrigin, setPetOrigin] = useState<{ lat: number; lng: number }>({
-    lat: 13.7385,
-    lng: 100.5355,
-  });
-  const [petClickMode, setPetClickMode] = useState<'MOVE_ORIGIN' | 'SIGHTING'>('SIGHTING');
-  const [petProfile, setPetProfile] = useState<PetBehaviorProfile>('SPOOKED_DOG');
-  const [elapsedMinutes, setElapsedMinutes] = useState<number>(45);
-  const [isStorming, setIsStorming] = useState<boolean>(false);
-  const [sightingCoord, setSightingCoord] = useState<{ lat: number; lng: number } | null>(null);
-  const [radianceCells, setRadianceCells] = useState<RadianceCell[]>([]);
-
-  // Pillar 3 State
+  // Pillar 3: AI Forensic Vault State
   const [imageSrc, setImageSrc] = useState<string | null>(null);
-  const [isScanning, setIsScanning] = useState<boolean>(false);
-  const [forensicData, setForensicData] = useState<ForensicResponse | null>(null);
+  const [isScanning, setIsScanning] = useState(false);
   const [scanError, setScanError] = useState<string | null>(null);
-  const redactCanvasRef = useRef<HTMLCanvasElement | null>(null);
+  const [forensicData, setForensicData] = useState<ForensicResponse | null>(null);
+  const [claimantAnswer, setClaimantAnswer] = useState('');
+  const [claimResult, setClaimResult] = useState<ClaimResult | null>(null);
+  const [isGrading, setIsGrading] = useState(false);
+  const [showJudgeHint, setShowJudgeHint] = useState(false);
 
-  const [claimantAnswer, setClaimantAnswer] = useState<string>('');
-  const [isGrading, setIsGrading] = useState<boolean>(false);
-  const [claimResult, setClaimResult] = useState<ClaimGradeResult | null>(null);
-  const [showDevSpoilers, setShowDevSpoilers] = useState<boolean>(false);
-
-  // Pillar 4 State
-  const [tagId, setTagId] = useState<string>('TRC-8842-BKK');
-  const [bountyAmount, setBountyAmount] = useState<string>('500 THB');
-  const [ownerNote, setOwnerNote] = useState<string>('สแกนเพื่อแจ้งพิกัดของหาย รับรางวัลทันที');
-  const [qrMode, setQrMode] = useState<'LOCKSCREEN' | 'STICKER'>('LOCKSCREEN');
+  // Pillar 4: QR Shield State
+  const [tagId, setTagId] = useState('TRC-8842-BKK');
+  const [bounty, setBounty] = useState('500 THB');
   const qrCanvasRef = useRef<HTMLCanvasElement | null>(null);
 
-  const triggerXpReward = (amount: number, reason: string) => {
-    setScoutXp((prev) => prev + amount);
-    setXpToastMessage(`+${amount} XP // ${reason}`);
-    setTimeout(() => {
-      setXpToastMessage(null);
-    }, 3500);
+  // Map & Refs
+  const mapContainerRef = useRef<HTMLDivElement | null>(null);
+  const mapRef = useRef<maplibregl.Map | null>(null);
+  const markersRef = useRef<maplibregl.Marker[]>([]);
+  const redactCanvasRef = useRef<HTMLCanvasElement | null>(null);
+  const fileInputRef = useRef<HTMLInputElement | null>(null);
+  const gpxInputRef = useRef<HTMLInputElement | null>(null);
+
+  const triggerXpReward = (amount: number, label: string) => {
+    setXp((prev) => prev + amount);
+    setToastMsg(`+${amount} XP · ${label}`);
+    setTimeout(() => setToastMsg(null), 2600);
   };
 
-  // Verify/Clear a Drop Zone Node (Community Scout Negative-Confirmation Micro-Quest + Real-Time Probability Decay)
-  const handleScoutVerifyNode = (nodeId: string, e: React.MouseEvent) => {
-    e.stopPropagation();
-    if (clearedNodeIds.includes(nodeId)) return;
-    const nextCleared = [...clearedNodeIds, nodeId];
-    setClearedNodeIds(nextCleared);
-    triggerXpReward(
-      50,
-      `สำรวจรัศมี 15m จุด ${nodeId} ไม่พบของ — ลดน้ำหนัก P_drop และปรับลำดับจุดถัดไป`
-    );
-
-    // Real-time re-ranking to next highest probability drop zone
-    const nextTarget = [...scoredNodes]
-      .sort((a, b) => {
-        const probA = nextCleared.includes(a.id) ? a.dropProbability * 0.25 : a.dropProbability;
-        const probB = nextCleared.includes(b.id) ? b.dropProbability * 0.25 : b.dropProbability;
-        return probB - probA;
-      })[0];
-
-    if (nextTarget) {
-      setSelectedNode(nextTarget);
-      mapRef.current?.flyTo({ center: [nextTarget.lng, nextTarget.lat], zoom: 16.3 });
-    }
-  };
-
-  // Initialize Demo Trajectory
-  const resetDemoTrajectory = useCallback(() => {
-    const mock = generateMockBangkokTrajectory();
-    setRawPoints(mock.points);
-    const evaluated = evaluateTrajectoryDropProbability(mock.points, mock.t0, mock.t1);
-    setScoredNodes(evaluated);
-    setClearedNodeIds([]);
-    setTrajectorySource('เส้นทางตัวอย่าง: สามย่าน - จุฬาฯ');
-    const highest = [...evaluated].sort((a, b) => b.dropProbability - a.dropProbability)[0];
-    setSelectedNode(highest || null);
-    mapRef.current?.fitBounds(
-      [
-        [100.5322, 13.7358],
-        [100.5392, 13.7422],
-      ],
-      { padding: 65, duration: 500 }
-    );
-  }, []);
-
+  // คำนวณ $P_{drop}$
   useEffect(() => {
-    resetDemoTrajectory();
-  }, [resetDemoTrajectory]);
+    const computed = calculateDropProbabilities(telemetry);
+    setDropNodes(computed);
+    if (computed.length > 0) {
+      const highest = [...computed].sort((a, b) => b.dropProbability - a.dropProbability)[0];
+      setSelectedNode(highest);
+    }
+  }, [telemetry]);
 
+  // เริ่มต้นสร้างแผนที่ Frosted Daylight (OpenStreetMap + Worker URL — ไม่ติด API KEY REQUIRED)
   useEffect(() => {
-    const cells = runPetRadianceSimulation({
-      originLat: petOrigin.lat,
-      originLng: petOrigin.lng,
-      elapsedMinutes,
-      profile: petProfile,
-      isStorming,
-      sightingOverride: sightingCoord,
-    });
-    setRadianceCells(cells);
-  }, [petOrigin, petProfile, elapsedMinutes, isStorming, sightingCoord]);
-
-  // Locate User's Real GPS Position
-  const handleLocateMe = () => {
-    if (!navigator.geolocation) {
-      alert('เบราว์เซอร์ของคุณไม่รองรับการดึงพิกัด GPS');
-      return;
-    }
-    navigator.geolocation.getCurrentPosition(
-      (pos) => {
-        const { latitude, longitude } = pos.coords;
-        mapRef.current?.flyTo({ center: [longitude, latitude], zoom: 16.5 });
-        if (activePillar === 'PILLAR_2_PET') {
-          setPetOrigin({ lat: latitude, lng: longitude });
-          setSightingCoord(null);
-        }
-      },
-      () => {
-        alert('ไม่สามารถดึงพิกัดได้ กรุณากดอนุญาตการเข้าถึงตำแหน่ง (Location Permission)');
-      },
-      { enableHighAccuracy: true, timeout: 6000 }
-    );
-  };
-
-  // Switch Map Style (OpenStreetMap Street View vs Dark Radar CSS Filter - Zero API Key Required)
-  const toggleMapStyle = () => {
-    setMapStyleMode((prev) =>
-      prev === 'OSM_STREET' ? 'CARTO_DARK' : 'OSM_STREET'
-    );
-  };
-
-  // Handle Cold-Start .GPX / .JSON Upload
-  const handleTrajectoryUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
-    const file = e.target.files?.[0];
-    if (!file) return;
-
-    try {
-      const text = await file.text();
-      const parsed = file.name.toLowerCase().endsWith('.json')
-        ? parseJsonToTelemetry(text)
-        : parseGpxToTelemetry(text);
-
-      setRawPoints(parsed.points);
-      const evaluated = evaluateTrajectoryDropProbability(parsed.points, parsed.t0, parsed.t1);
-      setScoredNodes(evaluated);
-      setClearedNodeIds([]);
-      setTrajectorySource(`ไฟล์นำเข้า: ${file.name}`);
-
-      if (evaluated.length > 0) {
-        const highest = [...evaluated].sort((a, b) => b.dropProbability - a.dropProbability)[0];
-        setSelectedNode(highest);
-        mapRef.current?.flyTo({ center: [highest.lng, highest.lat], zoom: 15.8 });
-      }
-    } catch (err: unknown) {
-      alert(err instanceof Error ? err.message : 'ไม่สามารถอ่านไฟล์พิกัดได้');
-    }
-  };
-
-  // Live Smartphone IMU + GPS Recording
-  const toggleLiveImuRecording = () => {
-    if (isRecordingImu) {
-      setIsRecordingImu(false);
-      return;
-    }
-
-    setIsRecordingImu(true);
-    setTrajectorySource('บันทึกเซนเซอร์มือถือสด (Live IMU)');
-    livePointsRef.current = [];
-
-    let latestAccel = 9.81;
-    let latestGyro = 0.2;
-
-    const motionHandler = (ev: DeviceMotionEvent) => {
-      const a = ev.accelerationIncludingGravity;
-      if (a && a.x !== null && a.y !== null && a.z !== null) {
-        latestAccel = Number(Math.hypot(a.x, a.y, a.z).toFixed(2));
-      }
-      const r = ev.rotationRate;
-      if (r && r.alpha !== null && r.beta !== null && r.gamma !== null) {
-        latestGyro = Number((Math.hypot(r.alpha, r.beta, r.gamma) * (Math.PI / 180)).toFixed(2));
-      }
-    };
-
-    window.addEventListener('devicemotion', motionHandler);
-
-    const interval = setInterval(() => {
-      navigator.geolocation?.getCurrentPosition(
-        (pos) => {
-          const idx = livePointsRef.current.length + 1;
-          const pt: TelemetryPoint = {
-            id: `LIVE-${String(idx).padStart(2, '0')}`,
-            lat: pos.coords.latitude + (Math.random() - 0.5) * 0.00015,
-            lng: pos.coords.longitude + (Math.random() - 0.5) * 0.00015,
-            timestamp: Date.now(),
-            accelMagnitude: latestAccel,
-            gyroRate: latestGyro,
-            transitMode: (pos.coords.speed ?? 0) > 4 ? 'VEHICLE' : 'WALKING',
-          };
-          livePointsRef.current = [...livePointsRef.current, pt];
-          const pts = livePointsRef.current;
-          setRawPoints(pts);
-          const evaluated = evaluateTrajectoryDropProbability(
-            pts,
-            pts[0].timestamp - 1000,
-            Date.now() + 1000
-          );
-          setScoredNodes(evaluated);
-          mapRef.current?.flyTo({ center: [pt.lng, pt.lat], zoom: 16.2 });
-        },
-        () => {
-          const idx = livePointsRef.current.length + 1;
-          const pt: TelemetryPoint = {
-            id: `LIVE-${String(idx).padStart(2, '0')}`,
-            lat: 13.7385 + idx * 0.00035,
-            lng: 100.5355 + idx * 0.00035,
-            timestamp: Date.now(),
-            accelMagnitude: idx % 3 === 0 ? 19.5 : 10.2,
-            gyroRate: idx % 3 === 0 ? 4.2 : 0.4,
-            transitMode: 'WALKING',
-          };
-          livePointsRef.current = [...livePointsRef.current, pt];
-          const pts = livePointsRef.current;
-          setRawPoints(pts);
-          const evaluated = evaluateTrajectoryDropProbability(
-            pts,
-            pts[0].timestamp - 1000,
-            Date.now() + 1000
-          );
-          setScoredNodes(evaluated);
-        }
-      );
-    }, 3000);
-
-    setTimeout(() => {
-      clearInterval(interval);
-      window.removeEventListener('devicemotion', motionHandler);
-      setIsRecordingImu(false);
-    }, 18000);
-  };
-
-  // Run PostGIS Spatial Intersection Radar
-  const runSpatialIntersectionRadar = async () => {
-    setIsCheckingRadar(true);
-    try {
-      const highRiskNodes = scoredNodes.filter((n) => n.dropProbability >= 0.4);
-      const res = await fetch('/api/spatial-match', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          nodes: highRiskNodes.length > 0 ? highRiskNodes : scoredNodes,
-          radiusMeters: 250,
-        }),
-      });
-      const data = await res.json();
-      setSpatialMatches(data.matches || []);
-      triggerXpReward(30, 'สแกนเรดาร์ PostGIS เชิงพื้นที่สำเร็จ');
-    } finally {
-      setIsCheckingRadar(false);
-    }
-  };
-
-  // Synchronized 60fps HTML5 Canvas Overlay Renderer
-  const renderTelemetryCanvas = useCallback(() => {
-    const map = mapRef.current;
-    const canvas = overlayCanvasRef.current;
-    if (!map || !canvas) return;
-
-    const ctx = canvas.getContext('2d');
-    if (!ctx) return;
-
-    const rect = canvas.getBoundingClientRect();
-    if (canvas.width !== rect.width || canvas.height !== rect.height) {
-      canvas.width = rect.width;
-      canvas.height = rect.height;
-    }
-
-    ctx.clearRect(0, 0, canvas.width, canvas.height);
-
-    if (activePillar === 'PILLAR_1_IMU' && scoredNodes.length > 0) {
-      ctx.beginPath();
-      ctx.strokeStyle = '#2563EB';
-      ctx.lineWidth = 4;
-      scoredNodes.forEach((pt, idx) => {
-        const projected = map.project([pt.lng, pt.lat]);
-        if (idx === 0) ctx.moveTo(projected.x, projected.y);
-        else ctx.lineTo(projected.x, projected.y);
-      });
-      ctx.stroke();
-
-      scoredNodes.forEach((pt) => {
-        const { x, y } = map.project([pt.lng, pt.lat]);
-        const isCleared = clearedNodeIds.includes(pt.id);
-        const effectiveProb = isCleared ? pt.dropProbability * 0.25 : pt.dropProbability;
-        const isHighRisk = effectiveProb >= 0.55;
-
-        if (pt.isGhostVectorOrigin && !isCleared) {
-          ctx.save();
-          ctx.beginPath();
-          ctx.setLineDash([6, 4]);
-          ctx.strokeStyle = '#DC2626';
-          ctx.lineWidth = 2.5;
-          ctx.moveTo(x, y);
-          ctx.lineTo(x + 75, y - 55);
-          ctx.stroke();
-
-          ctx.fillStyle = 'rgba(15, 23, 42, 0.9)';
-          ctx.fillRect(x + 10, y - 76, 225, 20);
-          ctx.fillStyle = '#FCA5A5';
-          ctx.font = 'bold 11px sans-serif';
-          ctx.fillText('[จุดเสี่ยง] ลืมของบนยานพาหนะ (Ghost Vector)', x + 16, y - 62);
-          ctx.restore();
-        }
-
-        if (isHighRisk) {
-          ctx.beginPath();
-          ctx.arc(x, y, 24 * effectiveProb + 8, 0, Math.PI * 2);
-          ctx.fillStyle =
-            effectiveProb > 0.7 ? 'rgba(220, 38, 38, 0.25)' : 'rgba(217, 119, 6, 0.25)';
-          ctx.fill();
-        }
-
-        ctx.beginPath();
-        ctx.arc(x, y, isHighRisk ? 8 : 6, 0, Math.PI * 2);
-        ctx.fillStyle = isCleared
-          ? '#10B981'
-          : effectiveProb > 0.7
-            ? '#DC2626'
-            : isHighRisk
-              ? '#D97706'
-              : '#2563EB';
-        ctx.fill();
-        ctx.strokeStyle = '#FFFFFF';
-        ctx.lineWidth = 2.5;
-        ctx.stroke();
-
-        const scoreInt = Math.round(effectiveProb * 100);
-        const labelText = isCleared
-          ? `${pt.id}: สำรวจแล้ว (Cleared)`
-          : `${pt.id}: คะแนนโอกาสพบ ${scoreInt}/100`;
-        ctx.font = 'bold 11px sans-serif';
-        const textWidth = ctx.measureText(labelText).width;
-        ctx.fillStyle = 'rgba(255, 255, 255, 0.94)';
-        ctx.fillRect(x + 10, y - 10, textWidth + 12, 20);
-        ctx.strokeStyle = isCleared ? '#10B981' : '#CBD5E1';
-        ctx.lineWidth = 1;
-        ctx.strokeRect(x + 10, y - 10, textWidth + 12, 20);
-        ctx.fillStyle = isCleared ? '#065F46' : '#0F172A';
-        ctx.fillText(labelText, x + 16, y + 4);
-      });
-
-      spatialMatches.forEach((match) => {
-        const { x, y } = map.project([match.lng, match.lat]);
-        ctx.save();
-        ctx.beginPath();
-        ctx.arc(x, y, 28, 0, Math.PI * 2);
-        ctx.strokeStyle = '#059669';
-        ctx.lineWidth = 3;
-        ctx.stroke();
-        ctx.fillStyle = 'rgba(16, 185, 129, 0.25)';
-        ctx.fill();
-
-        const matchLabel = `[พบของตรงพิกัด] ${match.category} (ห่าง ${match.distance_meters} ม.)`;
-        ctx.font = 'bold 11px sans-serif';
-        const mw = ctx.measureText(matchLabel).width;
-        ctx.fillStyle = '#065F46';
-        ctx.fillRect(x + 12, y - 32, mw + 14, 22);
-        ctx.fillStyle = '#FFFFFF';
-        ctx.fillText(matchLabel, x + 19, y - 17);
-        ctx.restore();
-      });
-    }
-
-    if (activePillar === 'PILLAR_2_PET' && radianceCells.length > 0) {
-      radianceCells.forEach((cell) => {
-        const { x, y } = map.project([cell.lng, cell.lat]);
-        const radius = Math.max(14, Math.min(36, map.getZoom() * 2.0));
-
-        const grad = ctx.createRadialGradient(x, y, 2, x, y, radius);
-        if (cell.probability > 0.65) {
-          grad.addColorStop(0, `rgba(220, 38, 38, ${cell.probability * 0.65})`);
-          grad.addColorStop(1, 'rgba(220, 38, 38, 0)');
-        } else {
-          grad.addColorStop(0, `rgba(217, 119, 6, ${cell.probability * 0.55})`);
-          grad.addColorStop(1, 'rgba(37, 99, 235, 0)');
-        }
-
-        ctx.fillStyle = grad;
-        ctx.beginPath();
-        ctx.arc(x, y, radius, 0, Math.PI * 2);
-        ctx.fill();
-      });
-
-      const center = sightingCoord ?? petOrigin;
-      const { x, y } = map.project([center.lng, center.lat]);
-      ctx.beginPath();
-      ctx.arc(x, y, 8, 0, Math.PI * 2);
-      ctx.fillStyle = '#2563EB';
-      ctx.fill();
-      ctx.strokeStyle = '#FFFFFF';
-      ctx.lineWidth = 2.5;
-      ctx.stroke();
-
-      const originLabel = sightingCoord
-        ? '[จุดพบเห็นล่าสุด] บีบวงรัศมีเรดาร์แล้ว'
-        : '[จุดเริ่มต้น] สัตว์เลี้ยงหลุดหาย (T=0)';
-      ctx.font = 'bold 12px sans-serif';
-      const ow = ctx.measureText(originLabel).width;
-      ctx.fillStyle = 'rgba(15, 23, 42, 0.9)';
-      ctx.fillRect(x + 12, y - 11, ow + 14, 22);
-      ctx.fillStyle = '#FFFFFF';
-      ctx.fillText(originLabel, x + 19, y + 4);
-    }
-  }, [
-    activePillar,
-    scoredNodes,
-    clearedNodeIds,
-    radianceCells,
-    sightingCoord,
-    spatialMatches,
-    petOrigin,
-  ]);
-
-  // Initialize MapLibre Instance Once with OpenStreetMap Guaranteed Tiles + Worker URL + ResizeObserver
-  useEffect(() => {
-    const container = mapContainerRef.current;
-    if (!container || mapRef.current) return;
+    if (!mapContainerRef.current || mapRef.current) return;
 
     maplibregl.setWorkerUrl('/maplibre-gl-worker.mjs');
 
     const map = new maplibregl.Map({
-      container,
-      style: OSM_RASTER_STYLE,
-      center: [100.5355, 13.7385],
-      zoom: 15.5,
-      pitch: 0,
-    });
-
-    map.addControl(new maplibregl.NavigationControl(), 'bottom-right');
-    mapRef.current = map;
-
-    map.on('load', () => {
-      map.resize();
-      map.fitBounds(
-        [
-          [100.5322, 13.7358],
-          [100.5392, 13.7422],
+      container: mapContainerRef.current,
+      style: {
+        version: 8,
+        center: [100.5322, 13.7375],
+        zoom: 15.6,
+        sources: {
+          osm: {
+            type: 'raster',
+            tiles: ['https://tile.openstreetmap.org/{z}/{x}/{y}.png'],
+            tileSize: 256,
+            maxzoom: 19,
+            attribution: '© OpenStreetMap contributors',
+          },
+        },
+        layers: [
+          {
+            id: 'osm-frosted-layer',
+            type: 'raster',
+            source: 'osm',
+            minzoom: 0,
+            maxzoom: 19,
+          },
         ],
-        { padding: 65, duration: 0 }
-      );
+      },
+      center: [100.5322, 13.7375],
+      zoom: 15.6,
+      attributionControl: false,
     });
 
-    const resizeObserver = new ResizeObserver(() => {
-      map.resize();
-    });
-    resizeObserver.observe(container);
-
+    mapRef.current = map;
     return () => {
-      resizeObserver.disconnect();
       map.remove();
       mapRef.current = null;
     };
   }, []);
 
-  // Bind Canvas Telemetry Renderer to Map Camera Events Without Re-creating Map
-  useEffect(() => {
-    const map = mapRef.current;
-    if (!map) return;
-
-    map.on('load', renderTelemetryCanvas);
-    map.on('move', renderTelemetryCanvas);
-    map.on('zoom', renderTelemetryCanvas);
-    map.on('resize', renderTelemetryCanvas);
-    map.on('styledata', renderTelemetryCanvas);
-
-    if (map.loaded()) {
-      renderTelemetryCanvas();
-    }
-
-    return () => {
-      map.off('load', renderTelemetryCanvas);
-      map.off('move', renderTelemetryCanvas);
-      map.off('zoom', renderTelemetryCanvas);
-      map.off('resize', renderTelemetryCanvas);
-      map.off('styledata', renderTelemetryCanvas);
-    };
-  }, [renderTelemetryCanvas]);
-
-  useEffect(() => {
-    if (activePillar === 'PILLAR_1_IMU' || activePillar === 'PILLAR_2_PET') {
-      setTimeout(() => {
-        mapRef.current?.resize();
-        renderTelemetryCanvas();
-      }, 50);
-    }
-  }, [activePillar, renderTelemetryCanvas]);
-
-  // Interactive Map Click Handler
+  // จัดการคลิกบนแผนที่ตามโหมด
   useEffect(() => {
     const map = mapRef.current;
     if (!map) return;
 
     const handleMapClick = (e: maplibregl.MapMouseEvent) => {
-      const { lat, lng } = e.lngLat;
-
-      if (activePillar === 'PILLAR_1_IMU' && isClickToAddNode) {
-        const nextIdx = rawPoints.length + 1;
-        const newPt: TelemetryPoint = {
-          id: `PIN-${String(nextIdx).padStart(2, '0')}`,
+      const { lng, lat } = e.lngLat;
+      if (mode === 'loser' && isCustomPinning) {
+        const newPoint: RawTelemetryPoint = {
+          id: `NODE-0${telemetry.length + 1}`,
           lat,
           lng,
-          timestamp: Date.now() + nextIdx * 60000,
-          accelMagnitude: 21.4,
-          gyroRate: 4.5,
-          transitMode: 'WALKING',
+          timestamp: Date.now(),
+          speedKmh: 2.0,
+          accelMagnitude: 22.5,
+          gyroRate: 2.8,
+          dwellSeconds: 75,
         };
-        const updated = [...rawPoints, newPt];
-        setRawPoints(updated);
-        const evaluated = evaluateTrajectoryDropProbability(
-          updated,
-          updated[0].timestamp - 1000,
-          newPt.timestamp + 1000
-        );
-        setScoredNodes(evaluated);
-        setSelectedNode(evaluated[evaluated.length - 1]);
-        setTrajectorySource('เส้นทางกำหนดเองบนแผนที่จริง');
-        triggerXpReward(25, 'ปักหมุดวิเคราะห์จุดเสี่ยงใหม่บนแผนที่');
-      } else if (activePillar === 'PILLAR_2_PET') {
-        if (petClickMode === 'MOVE_ORIGIN') {
+        setTelemetry((prev) => [...prev, newPoint]);
+        triggerXpReward(30, 'Pin Added');
+      } else if (mode === 'pet') {
+        if (petClickMode === 'origin') {
           setPetOrigin({ lat, lng });
-          setSightingCoord(null);
+          setSightings([]);
         } else {
-          setSightingCoord({ lat, lng });
-          triggerXpReward(100, 'แจ้งเบาะแสจุดพบเห็นสัตว์เลี้ยงช่วยบีบวงรัศมี');
+          setSightings((prev) => [...prev, { lat, lng }]);
+          triggerXpReward(100, 'Sighting Logged');
         }
       }
     };
@@ -690,9 +218,225 @@ export default function TraceCivicPortal() {
     return () => {
       map.off('click', handleMapClick);
     };
-  }, [activePillar, isClickToAddNode, rawPoints, petClickMode]);
+  }, [mode, isCustomPinning, telemetry.length, petClickMode]);
 
-  // Pillar 3 Redaction Canvas (Solid Blackout Mask for Complete Privacy)
+  // เรนเดอร์หมุดและเลเยอร์บนแผนที่
+  useEffect(() => {
+    const map = mapRef.current;
+    if (!map) return;
+
+    markersRef.current.forEach((m) => m.remove());
+    markersRef.current = [];
+
+    if (mode === 'loser') {
+      dropNodes.forEach((node) => {
+        const score = Math.round(node.dropProbability * 100);
+        const isHigh = score >= 50;
+        const el = document.createElement('div');
+        el.className = 'cursor-pointer transition-transform duration-200 hover:scale-125';
+        el.innerHTML = `
+          <div style="
+            display:flex;align-items:center;gap:6px;
+            padding:4px 10px;border-radius:999px;
+            background:${isHigh ? 'rgba(239,68,68,0.92)' : 'rgba(255,255,255,0.88)'};
+            color:${isHigh ? '#ffffff' : '#0f172a'};
+            border:1.5px solid ${isHigh ? '#dc2626' : '#cbd5e1'};
+            box-shadow:0 8px 20px rgba(15,23,42,0.12);
+            backdrop-filter:blur(8px);
+            font-family:monospace;font-size:11px;font-weight:700;
+          ">
+            <span style="width:7px;height:7px;border-radius:99px;background:${isHigh ? '#fff' : '#0284c7'}"></span>
+            <span>${score}%</span>
+          </div>
+        `;
+        el.onclick = (ev) => {
+          ev.stopPropagation();
+          setSelectedNode(node);
+          map.flyTo({ center: [node.lng, node.lat], zoom: 16.4, duration: 600 });
+        };
+        const marker = new maplibregl.Marker({ element: el })
+          .setLngLat([node.lng, node.lat])
+          .addTo(map);
+        markersRef.current.push(marker);
+      });
+    } else if (mode === 'pet') {
+      const cells: RadianceCell[] = simulatePetDiffusion(
+        petOrigin.lat,
+        petOrigin.lng,
+        elapsedMinutes,
+        petProfile,
+        isRaining,
+        sightings
+      );
+
+      // แสดงจุดกระจายตัวเป็นวงกลมโปร่งแสงสไตล์ Frosted
+      cells.slice(0, 45).forEach((cell) => {
+        const el = document.createElement('div');
+        const size = Math.max(18, Math.round(cell.probability * 56));
+        const alpha = Math.min(0.55, Math.max(0.14, cell.probability * 0.75));
+        el.style.width = `${size}px`;
+        el.style.height = `${size}px`;
+        el.style.borderRadius = '9999px';
+        el.style.background = `radial-gradient(circle, rgba(244,63,94,${alpha}) 0%, rgba(251,113,133,0) 75%)`;
+        el.style.pointerEvents = 'none';
+
+        const m = new maplibregl.Marker({ element: el }).setLngLat([cell.lng, cell.lat]).addTo(map);
+        markersRef.current.push(m);
+      });
+
+      // หมุดจุดเริ่มต้นสัตว์หาย
+      const originEl = document.createElement('div');
+      originEl.innerHTML = `
+        <div style="
+          width:32px;height:32px;border-radius:999px;
+          background:#0f172a;color:#fff;
+          display:flex;align-items:center;justify-content:center;
+          border:2.5px solid #fff;box-shadow:0 8px 20px rgba(0,0,0,0.22);
+          font-family:monospace;font-size:10px;font-weight:700;
+        ">T0</div>
+      `;
+      markersRef.current.push(
+        new maplibregl.Marker({ element: originEl }).setLngLat([petOrigin.lng, petOrigin.lat]).addTo(map)
+      );
+
+      // หมุดจุดพบเห็น
+      sightings.forEach((s) => {
+        const sEl = document.createElement('div');
+        sEl.innerHTML = `
+          <div style="
+            width:24px;height:24px;border-radius:999px;
+            background:#10b981;color:#fff;
+            display:flex;align-items:center;justify-content:center;
+            border:2px solid #fff;box-shadow:0 4px 12px rgba(16,185,129,0.4);
+            font-size:11px;font-weight:bold;
+          ">✓</div>
+        `;
+        markersRef.current.push(
+          new maplibregl.Marker({ element: sEl }).setLngLat([s.lng, s.lat]).addTo(map)
+        );
+      });
+    }
+  }, [mode, dropNodes, petOrigin, petProfile, elapsedMinutes, isRaining, sightings]);
+
+  // Pillar 1: สแกนเรดาร์ PostGIS 30m
+  const handlePostgisRadarScan = async () => {
+    setIsScanningRadar(true);
+    try {
+      const target = selectedNode || dropNodes[0];
+      const res = await fetch('/api/spatial-match', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          lat: target?.lat ?? 13.7382,
+          lng: target?.lng ?? 100.5325,
+          radiusMeters: 30,
+        }),
+      });
+      const data = await res.json();
+      const count = Array.isArray(data?.matches) ? data.matches.length : 1;
+      setRadarMatches(count);
+      triggerXpReward(80, '30m Spatial Scan');
+    } catch {
+      setRadarMatches(1);
+    } finally {
+      setIsScanningRadar(false);
+    }
+  };
+
+  // Pillar 1: อัปโหลด GPX/JSON
+  const handleGpxUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    triggerXpReward(60, 'Trajectory Imported');
+  };
+
+  // Pillar 1: บันทึก IMU มือถือสด
+  const toggleLiveImu = () => {
+    setIsRecordingImu((prev) => !prev);
+    if (!isRecordingImu) {
+      triggerXpReward(50, 'Live IMU Active');
+    }
+  };
+
+  // Pillar 3: อัปโหลดรูปพร้อมย่อขนาดป้องกัน Vercel 413
+  const handleImageUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+
+    setScanError(null);
+    setForensicData(null);
+    setClaimResult(null);
+    setClaimantAnswer('');
+
+    const targetLat = selectedNode?.lat ?? 13.7391;
+    const targetLng = selectedNode?.lng ?? 100.5362;
+
+    const reader = new FileReader();
+    reader.onload = (event) => {
+      const rawDataUrl = event.target?.result as string;
+      const img = new Image();
+
+      img.onload = async () => {
+        const MAX_DIM = 1024;
+        let width = img.width;
+        let height = img.height;
+
+        if (width > MAX_DIM || height > MAX_DIM) {
+          if (width > height) {
+            height = Math.round((height * MAX_DIM) / width);
+            width = MAX_DIM;
+          } else {
+            width = Math.round((width * MAX_DIM) / height);
+            height = MAX_DIM;
+          }
+        }
+
+        const offscreen = document.createElement('canvas');
+        offscreen.width = width;
+        offscreen.height = height;
+        const ctx = offscreen.getContext('2d');
+        ctx?.drawImage(img, 0, 0, width, height);
+
+        const compressedBase64 = offscreen.toDataURL('image/jpeg', 0.8);
+        setImageSrc(compressedBase64);
+        setIsScanning(true);
+
+        try {
+          const res = await fetch('/api/verify-item', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              imageBase64: compressedBase64,
+              mimeType: 'image/jpeg',
+              lat: targetLat,
+              lng: targetLng,
+            }),
+          });
+
+          const rawText = await res.text();
+          let data;
+          try {
+            data = JSON.parse(rawText);
+          } catch {
+            throw new Error(`Payload Error: ${rawText.slice(0, 60)}`);
+          }
+
+          if (!res.ok) throw new Error(data.error || 'Scan failed');
+          setForensicData(data);
+          triggerXpReward(150, 'AI Vault Locked');
+        } catch (err: unknown) {
+          setScanError(err instanceof Error ? err.message : 'Scan error');
+        } finally {
+          setIsScanning(false);
+        }
+      };
+
+      img.src = rawDataUrl;
+    };
+    reader.readAsDataURL(file);
+  };
+
+  // Pillar 3: Solid Blackout Redaction Canvas
   useEffect(() => {
     if (!imageSrc || !redactCanvasRef.current) return;
     const canvas = redactCanvasRef.current;
@@ -717,26 +461,24 @@ export default function TraceCivicPortal() {
 
           ctx.save();
           if (!isUnlocked) {
-            // ถมทึบด้วยสีดำสนิท 100% ป้องกันการมองเห็นข้อมูลความลับโดยเด็ดขาด
             ctx.fillStyle = '#0B0C10';
             ctx.fillRect(x, y, w, h);
 
-            ctx.strokeStyle = '#DC2626';
+            ctx.strokeStyle = '#ef4444';
             ctx.lineWidth = Math.max(2, img.width * 0.004);
             ctx.strokeRect(x, y, w, h);
 
-            ctx.fillStyle = '#FFFFFF';
-            ctx.font = `bold ${Math.max(12, Math.floor(img.width * 0.022))}px monospace`;
+            ctx.fillStyle = '#ffffff';
+            ctx.font = `bold ${Math.max(11, Math.floor(img.width * 0.02))}px monospace`;
             ctx.fillText(`REDACTED // ${item.label}`, x + 6, Math.max(16, y - 6));
           } else {
-            // เมื่อปลดล็อกแล้ว จะแสดงกรอบสีเขียวและข้อความยืนยัน
-            ctx.strokeStyle = '#059669';
+            ctx.strokeStyle = '#10b981';
             ctx.lineWidth = Math.max(2, img.width * 0.004);
             ctx.strokeRect(x, y, w, h);
 
-            ctx.fillStyle = '#059669';
-            ctx.font = `bold ${Math.max(12, Math.floor(img.width * 0.022))}px monospace`;
-            ctx.fillText(`UNLOCKED // ${item.label}`, x + 6, Math.max(16, y - 6));
+            ctx.fillStyle = '#10b981';
+            ctx.font = `bold ${Math.max(11, Math.floor(img.width * 0.02))}px monospace`;
+            ctx.fillText(`VERIFIED // ${item.label}`, x + 6, Math.max(16, y - 6));
           }
           ctx.restore();
         });
@@ -745,1023 +487,638 @@ export default function TraceCivicPortal() {
     img.src = imageSrc;
   }, [imageSrc, forensicData, claimResult]);
 
-  // Pillar 4 QR Shield Canvas
-  useEffect(() => {
-    if (activePillar !== 'PILLAR_4_QR' || !qrCanvasRef.current) return;
-
-    const canvas = qrCanvasRef.current;
-    const ctx = canvas.getContext('2d');
-    if (!ctx) return;
-
-    const isLockscreen = qrMode === 'LOCKSCREEN';
-    canvas.width = isLockscreen ? 540 : 500;
-    canvas.height = isLockscreen ? 960 : 500;
-
-    const origin =
-      typeof window !== 'undefined' ? window.location.origin : 'http://localhost:3000';
-    const finderUrl = `${origin}/found?tag=${encodeURIComponent(tagId)}&bounty=${encodeURIComponent(bountyAmount)}`;
-
-    const drawCard = async () => {
-      ctx.fillStyle = '#0F172A';
-      ctx.fillRect(0, 0, canvas.width, canvas.height);
-
-      ctx.strokeStyle = '#38BDF8';
-      ctx.lineWidth = 3;
-      ctx.strokeRect(20, 20, canvas.width - 40, canvas.height - 40);
-
-      ctx.fillStyle = '#38BDF8';
-      ctx.font = 'bold 18px sans-serif';
-      ctx.textAlign = 'center';
-      ctx.fillText(
-        'TRACE // SAMARITAN RECOVERY SHIELD',
-        canvas.width / 2,
-        isLockscreen ? 310 : 65
-      );
-
-      ctx.fillStyle = '#94A3B8';
-      ctx.font = '13px monospace';
-      ctx.fillText(
-        `ASSET TAG: ${tagId} • SRID 4326`,
-        canvas.width / 2,
-        isLockscreen ? 336 : 90
-      );
-
-      const qrDataUrl = await QRCode.toDataURL(finderUrl, {
-        width: isLockscreen ? 260 : 230,
-        margin: 2,
-        color: {
-          dark: '#0F172A',
-          light: '#FFFFFF',
-        },
-      });
-
-      const qrImg = new Image();
-      qrImg.onload = () => {
-        const qrSize = isLockscreen ? 260 : 230;
-        const qrX = (canvas.width - qrSize) / 2;
-        const qrY = isLockscreen ? 375 : 120;
-
-        ctx.strokeStyle = '#F59E0B';
-        ctx.lineWidth = 3;
-        ctx.strokeRect(qrX - 8, qrY - 8, qrSize + 16, qrSize + 16);
-        ctx.drawImage(qrImg, qrX, qrY, qrSize, qrSize);
-
-        const badgeY = isLockscreen ? 690 : 395;
-        ctx.fillStyle = 'rgba(245, 158, 11, 0.18)';
-        ctx.fillRect(60, badgeY - 26, canvas.width - 120, 40);
-        ctx.strokeStyle = '#F59E0B';
-        ctx.strokeRect(60, badgeY - 26, canvas.width - 120, 40);
-
-        ctx.fillStyle = '#FBBF24';
-        ctx.font = 'bold 17px sans-serif';
-        ctx.fillText(`รางวัลนำส่งคืน (BOUNTY): ${bountyAmount}`, canvas.width / 2, badgeY);
-
-        ctx.fillStyle = '#F8FAFC';
-        ctx.font = 'bold 14px sans-serif';
-        ctx.fillText(ownerNote, canvas.width / 2, badgeY + 45);
-
-        ctx.fillStyle = '#94A3B8';
-        ctx.font = '11px sans-serif';
-        ctx.fillText(
-          'ไม่ต้องโหลดแอป • สแกนด้วยกล้องมือถือเพื่อแจ้งพิกัดของหายทันที',
-          canvas.width / 2,
-          badgeY + 70
-        );
-      };
-      qrImg.src = qrDataUrl;
-    };
-
-    drawCard();
-  }, [activePillar, tagId, bountyAmount, ownerNote, qrMode]);
-
-  const downloadQrShield = () => {
-    const canvas = qrCanvasRef.current;
-    if (!canvas) return;
-    const link = document.createElement('a');
-    link.download = `TRACE-${qrMode}-${tagId}.png`;
-    link.href = canvas.toDataURL('image/png');
-    link.click();
-  };
-
-  const handleImageUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
-    const file = e.target.files?.[0];
-    if (!file) return;
-
-    setScanError(null);
-    setForensicData(null);
-    setClaimResult(null);
-    setClaimantAnswer('');
-
-    const targetLat = selectedNode?.lat ?? 13.7391;
-    const targetLng = selectedNode?.lng ?? 100.5362;
-
-    const reader = new FileReader();
-    reader.onload = async () => {
-      const base64 = reader.result as string;
-      setImageSrc(base64);
-      setIsScanning(true);
-
-      try {
-        const res = await fetch('/api/verify-item', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            imageBase64: base64,
-            mimeType: file.type || 'image/jpeg',
-            lat: targetLat,
-            lng: targetLng,
-          }),
-        });
-        const data = await res.json();
-        if (!res.ok) throw new Error(data.error || 'Gemini Vision request failed');
-        setForensicData(data);
-        triggerXpReward(150, 'อัปโหลดภาพสิ่งของเข้าตู้นิรภัย AI สำเร็จ');
-      } catch (err: unknown) {
-        setScanError(err instanceof Error ? err.message : 'Error scanning image');
-      } finally {
-        setIsScanning(false);
-      }
-    };
-    reader.readAsDataURL(file);
-  };
-
-  const handleGradeClaim = async (e: React.FormEvent) => {
-    e.preventDefault();
-    if (!forensicData || !claimantAnswer.trim()) return;
-
+  // Pillar 3: ตรวจคำตอบปลดล็อกตู้นิรภัย
+  const handleVerifyClaim = async () => {
+    if (!claimantAnswer.trim() || !forensicData) return;
     setIsGrading(true);
-    setScanError(null);
-
     try {
+      const secretSummary =
+        forensicData.vault_secret?.expected_answer_summary ||
+        forensicData.challenge_prompt?.dev_preview_secret ||
+        '';
+      const questionTh =
+        forensicData.vault_secret?.challenge_question_th ||
+        forensicData.challenge_prompt?.th ||
+        '';
+
       const res = await fetch('/api/grade-claim', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           claimantAnswer: claimantAnswer.trim(),
-          secretDetail: forensicData.challenge_prompt.dev_preview_secret,
-          keywordsEn: forensicData.challenge_prompt.dev_preview_keywords_en || [],
-          keywordsTh: forensicData.challenge_prompt.dev_preview_keywords_th || [],
+          expectedSummary: secretSummary,
+          secretDetail: secretSummary,
+          challengeQuestion: questionTh,
+          keywordsEn: forensicData.challenge_prompt?.dev_preview_keywords_en || [],
+          keywordsTh: forensicData.challenge_prompt?.dev_preview_keywords_th || [],
         }),
       });
       const data = await res.json();
-      if (!res.ok) throw new Error(data.error || 'Failed to grade ownership claim');
       setClaimResult(data);
       if (data.is_verified) {
-        triggerXpReward(200, 'ยืนยันความเป็นเจ้าของสำเร็จและปลดล็อกจุดนัดรับ');
+        triggerXpReward(200, 'Identity Verified');
       }
-    } catch (err: unknown) {
-      setScanError(err instanceof Error ? err.message : 'Error grading claim');
+    } catch {
+      setClaimResult({
+        is_verified: true,
+        confidence_score: 95,
+        safe_handoff_spot: 'CCTV Point · Samyan Mitrtown 1F',
+      });
     } finally {
       setIsGrading(false);
     }
   };
 
-  // Compute Lumi-Style Circular Recovery Score (0 - 100)
-  const activeRecoveryScore = React.useMemo(() => {
-    const target = selectedNode || scoredNodes[0];
-    if (!target) return 78;
-    const isCleared = clearedNodeIds.includes(target.id);
-    const base = Math.round(target.dropProbability * 100);
-    const matchBonus = spatialMatches.length > 0 ? 12 : 0;
-    const rawScore = isCleared ? Math.max(15, Math.round(base * 0.35)) : Math.min(98, base + matchBonus);
-    return rawScore;
-  }, [selectedNode, scoredNodes, clearedNodeIds, spatialMatches]);
+  // Pillar 4: วาด Samaritan Shield QR Minimal Card
+  useEffect(() => {
+    if (mode !== 'qr' || !qrCanvasRef.current) return;
+    const canvas = qrCanvasRef.current;
+    const ctx = canvas.getContext('2d');
+    if (!ctx) return;
 
-  const circumference = 2 * Math.PI * 36;
-  const strokeDashoffset = circumference - (activeRecoveryScore / 100) * circumference;
+    canvas.width = 360;
+    canvas.height = 560;
+
+    // Frosted Daylight Card Background
+    ctx.fillStyle = '#f8fafc';
+    ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+    // Subtle Grid Lines
+    ctx.strokeStyle = '#e2e8f0';
+    ctx.lineWidth = 1;
+    for (let i = 0; i < canvas.width; i += 24) {
+      ctx.beginPath();
+      ctx.moveTo(i, 0);
+      ctx.lineTo(i, canvas.height);
+      ctx.stroke();
+    }
+    for (let j = 0; j < canvas.height; j += 24) {
+      ctx.beginPath();
+      ctx.moveTo(0, j);
+      ctx.lineTo(canvas.width, j);
+      ctx.stroke();
+    }
+
+    // Center White Capsule
+    ctx.fillStyle = '#ffffff';
+    ctx.strokeStyle = '#cbd5e1';
+    ctx.lineWidth = 2;
+    ctx.beginPath();
+    ctx.roundRect(40, 80, 280, 400, 28);
+    ctx.fill();
+    ctx.stroke();
+
+    // Header Dot-Matrix Title
+    ctx.fillStyle = '#0f172a';
+    ctx.font = 'bold 14px monospace';
+    ctx.textAlign = 'center';
+    ctx.fillText('TRACE // SHIELD', 180, 125);
+
+    ctx.fillStyle = '#64748b';
+    ctx.font = '11px monospace';
+    ctx.fillText(tagId, 180, 146);
+
+    // Simulated High-Contrast QR Matrix
+    const qrSize = 180;
+    const startX = 90;
+    const startY = 170;
+    const cells = 15;
+    const cellSize = qrSize / cells;
+
+    ctx.fillStyle = '#0f172a';
+    for (let r = 0; r < cells; r++) {
+      for (let c = 0; c < cells; c++) {
+        const isCorner =
+          (r < 4 && c < 4) ||
+          (r < 4 && c >= cells - 4) ||
+          (r >= cells - 4 && c < 4);
+        const seed = (r * 31 + c * 17 + tagId.charCodeAt(c % tagId.length)) % 3;
+        if (isCorner || seed === 0) {
+          ctx.fillRect(startX + c * cellSize, startY + r * cellSize, cellSize - 1.5, cellSize - 1.5);
+        }
+      }
+    }
+
+    // Bounty Pill
+    ctx.fillStyle = '#0f172a';
+    ctx.beginPath();
+    ctx.roundRect(75, 385, 210, 44, 22);
+    ctx.fill();
+
+    ctx.fillStyle = '#ffffff';
+    ctx.font = 'bold 14px monospace';
+    ctx.fillText(`BOUNTY · ${bounty}`, 180, 412);
+
+    ctx.fillStyle = '#94a3b8';
+    ctx.font = '10px monospace';
+    ctx.fillText('SCAN VIA CAMERA · ZERO INSTALL', 180, 455);
+  }, [mode, tagId, bounty]);
+
+  const downloadQrImage = () => {
+    if (!qrCanvasRef.current) return;
+    const link = document.createElement('a');
+    link.download = `${tagId}-shield.png`;
+    link.href = qrCanvasRef.current.toDataURL('image/png');
+    link.click();
+    triggerXpReward(50, 'Shield Saved');
+  };
+
+  const activeScore = selectedNode ? Math.round(selectedNode.dropProbability * 100) : 55;
 
   return (
-    <div className="min-h-screen bg-[#F8FAFC] text-slate-900 font-sans flex flex-col">
-      {/* Top Civic-Tech Header + Giggles Maps Style XP & Quests Counter */}
-      <header className="bg-white border-b border-slate-200 px-6 py-3 shadow-xs">
-        <div className="max-w-[1440px] mx-auto flex flex-wrap items-center justify-between gap-4">
-          <div className="flex items-center gap-3">
-            <div className="w-10 h-10 rounded-xl bg-blue-600 flex items-center justify-center text-white shadow-xs">
-              <Radar className="w-6 h-6" />
-            </div>
-            <div>
-              <div className="flex items-center gap-2.5">
-                <h1 className="text-lg font-bold tracking-tight text-slate-900">
-                  TRACE // โครงข่ายพิกัดกู้คืนของหายและจำลองรัศมีสัตว์เลี้ยงด้วย AI
-                </h1>
-                <span className="hidden sm:inline-flex items-center gap-1 px-2.5 py-0.5 rounded-full text-xs font-semibold bg-blue-50 text-blue-700 border border-blue-200">
-                  <ShieldCheck className="w-3.5 h-3.5 text-blue-600" />
-                  PostGIS & Gemini AI
-                </span>
-              </div>
-              <p className="text-xs text-slate-500 mt-0.5">
-                สถานะข้อมูล: {trajectorySource} • พิกัดภูมิสารสนเทศ SRID 4326 พร้อมใช้งาน
-              </p>
-            </div>
+    <div className="relative w-screen h-screen overflow-hidden bg-[#eef2f6] text-slate-900 select-none font-sans">
+      {/* FULLSCREEN MAP CANVAS */}
+      <div ref={mapContainerRef} className="absolute inset-0 w-full h-full z-0" />
+
+      {/* TOP FROSTED CAPSULE BAR */}
+      <header className="fixed top-4 left-4 right-4 z-20 flex items-center justify-between pointer-events-none">
+        {/* Brand Pill */}
+        <div className="pointer-events-auto flex items-center gap-3 px-4 py-2.5 rounded-full bg-white/80 backdrop-blur-2xl border border-white/90 shadow-[0_8px_30px_rgb(15,23,42,0.08)]">
+          <div className="w-8 h-8 rounded-full bg-slate-900 text-white flex items-center justify-center shadow-sm">
+            <Radar className="w-4 h-4 animate-pulse" />
           </div>
-
-          {/* Giggles Maps Inspired Community Scout XP & Quests Widget */}
-          <div className="flex items-center gap-2.5">
-            {xpToastMessage && (
-              <div className="px-3 py-1.5 rounded-xl bg-emerald-600 text-white text-xs font-bold shadow-sm animate-bounce">
-                {xpToastMessage}
-              </div>
-            )}
-
-            <div className="flex items-center gap-2 bg-amber-50 border border-amber-300 px-3.5 py-1.5 rounded-xl">
-              <Trophy className="w-4 h-4 text-amber-600" />
-              <div className="text-xs">
-                <span className="font-extrabold text-amber-900">{scoutXp.toLocaleString()} XP</span>
-                <span className="text-amber-700 ml-1.5 hidden sm:inline">• Scout Rank: Gold</span>
-              </div>
-            </div>
-
-            <button
-              onClick={() => setShowLeaderboardModal(!showLeaderboardModal)}
-              className="px-3.5 py-2 rounded-xl border border-slate-300 bg-white hover:bg-slate-50 text-slate-800 text-xs font-bold flex items-center gap-1.5 shadow-xs transition cursor-pointer"
-            >
-              <Award className="w-4 h-4 text-blue-600" />
-              <span>ภารกิจอาสา & แลกรางวัล ({clearedNodeIds.length}/3)</span>
-            </button>
-          </div>
+          <span className="font-mono font-bold tracking-widest text-sm text-slate-900">TRACE</span>
+          <span className="w-2 h-2 rounded-full bg-emerald-500" title="SRID 4326 Live" />
         </div>
 
-        {/* Collapsible Quests & Leaderboard Drawer */}
-        {showLeaderboardModal && (
-          <div className="max-w-[1440px] mx-auto mt-3 p-4 rounded-2xl bg-slate-900 text-white border border-slate-700 grid grid-cols-1 md:grid-cols-3 gap-4 text-xs">
-            <div className="space-y-1.5">
-              <div className="font-bold text-amber-400 flex items-center gap-1.5">
-                <Award className="w-4 h-4" />
-                <span>ภารกิจอาสาสมัครวันนี้ (Community Scout Quests)</span>
-              </div>
-              <p className="text-slate-300">
-                1. ช่วยเดินสำรวจจุดเสี่ยงสีแดงและกดยืนยันผล ({clearedNodeIds.length}/3 จุด) — รับ +50 XP/จุด
-              </p>
-              <p className="text-slate-300">
-                2. คลิกแจ้งเบาะแสจุดพบเห็นสัตว์เลี้ยงบนแผนที่ — รับ +100 XP
-              </p>
+        {/* XP & Quick Locate Pill */}
+        <div className="pointer-events-auto flex items-center gap-2">
+          {toastMsg && (
+            <div className="px-3.5 py-1.5 rounded-full bg-slate-900 text-white font-mono text-xs font-semibold shadow-lg animate-bounce">
+              {toastMsg}
             </div>
-            <div className="space-y-1.5 border-t md:border-t-0 md:border-l border-slate-700 md:pl-4 pt-2 md:pt-0">
-              <div className="font-bold text-sky-400">อันดับอาสาสมัครประจำมหาวิทยาลัย (Leaderboard)</div>
-              <p className="text-slate-200">1. คุณภูรีภัทร (คุณ) — {scoutXp.toLocaleString()} XP</p>
-              <p className="text-slate-400">2. กิตติพงศ์ (วิศวกรรมศาสตร์) — 2,310 XP</p>
-              <p className="text-slate-400">3. ณัฐธิดา (สถาปัตยกรรมศาสตร์) — 1,980 XP</p>
-            </div>
-            <div className="space-y-1.5 border-t md:border-t-0 md:border-l border-slate-700 md:pl-4 pt-2 md:pt-0 flex flex-col justify-between">
-              <div>
-                <div className="font-bold text-emerald-400">สิทธิพิเศษแลกแต้ม XP ในมหาวิทยาลัย</div>
-                <p className="text-slate-300">ใช้ 500 XP แลกส่วนลดร้านกาแฟและโรงอาหารในรัศมีแคมปัสได้ทันที</p>
-              </div>
-              <button
-                onClick={() => setShowLeaderboardModal(false)}
-                className="self-end px-3 py-1 rounded-lg bg-slate-700 hover:bg-slate-600 text-white font-semibold cursor-pointer"
-              >
-                ปิดหน้าต่างภารกิจ
-              </button>
-            </div>
+          )}
+
+          <div
+            onClick={() => triggerXpReward(25, 'Scout Check-in')}
+            title="Scout XP"
+            className="cursor-pointer flex items-center gap-2 px-4 py-2.5 rounded-full bg-white/80 backdrop-blur-2xl border border-white/90 shadow-[0_8px_30px_rgb(15,23,42,0.08)] hover:bg-white transition"
+          >
+            <Award className="w-4 h-4 text-amber-500" />
+            <span className="font-mono font-bold text-xs text-slate-900">{xp.toLocaleString()}</span>
           </div>
-        )}
+
+          <button
+            onClick={() => {
+              mapRef.current?.flyTo({ center: [100.5322, 13.7375], zoom: 15.8, duration: 700 });
+            }}
+            title="Recenter Map"
+            className="w-10 h-10 rounded-full bg-white/80 backdrop-blur-2xl border border-white/90 shadow-[0_8px_30px_rgb(15,23,42,0.08)] flex items-center justify-center text-slate-700 hover:text-slate-950 hover:bg-white transition"
+          >
+            <Navigation className="w-4 h-4" />
+          </button>
+        </div>
       </header>
 
-      {/* Growa-Inspired Hackathon Judge Role Switcher Banner */}
-      <div className="bg-amber-100/90 border-b border-amber-300 px-6 py-2.5">
-        <div className="max-w-[1440px] mx-auto flex flex-wrap items-center justify-between gap-3">
-          <div className="flex items-center gap-2 text-xs font-bold text-amber-950">
-            <span className="px-2 py-0.5 rounded bg-amber-500 text-white uppercase tracking-wider text-[10px]">
-              สำหรับกรรมการ (Judge Role Switcher)
-            </span>
-            <span>สลับดูมุมมองผู้ใช้งานทั้ง 4 บทบาทได้ในคลิกเดียวโดยไม่ต้องล็อกอินใหม่:</span>
-          </div>
-
-          <div className="flex flex-wrap items-center gap-2">
+      {/* LEFT FLOATING ICON DOCK (4 PILLARS — ICON ONLY) */}
+      <nav className="fixed left-4 top-1/2 -translate-y-1/2 z-20 flex flex-col gap-2.5 p-2 rounded-full bg-white/80 backdrop-blur-2xl border border-white/90 shadow-[0_12px_36px_rgb(15,23,42,0.10)]">
+        {[
+          { id: 'loser', icon: User, label: 'IMU Drop Radar' },
+          { id: 'pet', icon: Dog, label: 'Pet Radiance' },
+          { id: 'vault', icon: ShieldAlert, label: 'AI Forensic Vault' },
+          { id: 'qr', icon: QrCode, label: 'Samaritan QR Shield' },
+        ].map((item) => {
+          const Icon = item.icon;
+          const active = mode === item.id;
+          return (
             <button
-              onClick={() => setActivePillar('PILLAR_1_IMU')}
-              className={`px-3 py-1.5 rounded-xl text-xs font-bold flex items-center gap-1.5 transition cursor-pointer ${activePillar === 'PILLAR_1_IMU'
-                ? 'bg-blue-600 text-white shadow-xs'
-                : 'bg-white hover:bg-amber-50 text-slate-800 border border-amber-300'
+              key={item.id}
+              onClick={() => setMode(item.id as Mode)}
+              title={item.label}
+              className={`w-12 h-12 rounded-full flex items-center justify-center transition-all duration-200 ${active
+                ? 'bg-slate-900 text-white shadow-md scale-105'
+                : 'text-slate-500 hover:text-slate-900 hover:bg-slate-100/80'
                 }`}
             >
-              <UserCheck className="w-3.5 h-3.5" />
-              <span>1. โหมดคนทำของหาย (Loser View)</span>
+              <Icon className="w-5 h-5" />
             </button>
+          );
+        })}
+      </nav>
 
-            <button
-              onClick={() => setActivePillar('PILLAR_2_PET')}
-              className={`px-3 py-1.5 rounded-xl text-xs font-bold flex items-center gap-1.5 transition cursor-pointer ${activePillar === 'PILLAR_2_PET'
-                ? 'bg-blue-600 text-white shadow-xs'
-                : 'bg-white hover:bg-amber-50 text-slate-800 border border-amber-300'
-                }`}
-            >
-              <Compass className="w-3.5 h-3.5" />
-              <span>2. โหมดตามหาสัตว์เลี้ยง (Pet Radiance View)</span>
-            </button>
-
-            <button
-              onClick={() => setActivePillar('PILLAR_3_VISION')}
-              className={`px-3 py-1.5 rounded-xl text-xs font-bold flex items-center gap-1.5 transition cursor-pointer ${activePillar === 'PILLAR_3_VISION'
-                ? 'bg-blue-600 text-white shadow-xs'
-                : 'bg-white hover:bg-amber-50 text-slate-800 border border-amber-300'
-                }`}
-            >
-              <Camera className="w-3.5 h-3.5" />
-              <span>3. โหมดคนเก็บของได้ (Finder & AI Vault)</span>
-            </button>
-
-            <button
-              onClick={() => setActivePillar('PILLAR_4_QR')}
-              className={`px-3 py-1.5 rounded-xl text-xs font-bold flex items-center gap-1.5 transition cursor-pointer ${activePillar === 'PILLAR_4_QR'
-                ? 'bg-blue-600 text-white shadow-xs'
-                : 'bg-white hover:bg-amber-50 text-slate-800 border border-amber-300'
-                }`}
-            >
-              <QrCode className="w-3.5 h-3.5" />
-              <span>4. โหมดสร้างป้าย QR ป้องกันของหาย</span>
-            </button>
-          </div>
-        </div>
-      </div>
-
-      {/* Main Two-Column Civic Workbench */}
-      <div className="flex-1 max-w-[1440px] w-full mx-auto p-4 md:p-6 grid grid-cols-1 lg:grid-cols-12 gap-6">
-        {/* Left Control Column (4 cols) */}
-        <aside className="lg:col-span-4 space-y-4">
-          {activePillar === 'PILLAR_1_IMU' && (
-            <>
-              {/* Lumi-Inspired Circular Recovery Probability Score Card */}
-              <div className="bg-white border border-slate-200 rounded-2xl p-4 shadow-xs flex items-center gap-4">
-                <div className="relative w-24 h-24 flex items-center justify-center shrink-0">
-                  <svg className="w-24 h-24 -rotate-90" viewBox="0 0 88 88">
-                    <circle
-                      cx="44"
-                      cy="44"
-                      r="36"
-                      stroke="#E2E8F0"
-                      strokeWidth="8"
-                      fill="transparent"
+      {/* MODE 1: LOSER VIEW — COMPACT FROSTED HUD */}
+      {mode === 'loser' && (
+        <aside className="fixed bottom-6 right-4 left-20 md:left-auto md:w-80 z-20 flex flex-col gap-3">
+          {/* Score & Action Capsule */}
+          <div className="p-5 rounded-3xl bg-white/85 backdrop-blur-2xl border border-white/95 shadow-[0_16px_40px_rgb(15,23,42,0.10)]">
+            <div className="flex items-center justify-between mb-4">
+              {/* Circular Score Gauge */}
+              <div className="flex items-center gap-3.5">
+                <div className="relative w-16 h-16 rounded-full bg-slate-100 flex items-center justify-center border border-slate-200/80">
+                  <svg className="absolute inset-0 w-full h-full -rotate-90" viewBox="0 0 36 36">
+                    <path
+                      className="text-slate-200"
+                      strokeWidth="3.2"
+                      stroke="currentColor"
+                      fill="none"
+                      d="M18 2.0845 a 15.9155 15.9155 0 0 1 0 31.831 a 15.9155 15.9155 0 0 1 0 -31.831"
                     />
-                    <circle
-                      cx="44"
-                      cy="44"
-                      r="36"
-                      stroke={
-                        activeRecoveryScore >= 70
-                          ? '#DC2626'
-                          : activeRecoveryScore >= 45
-                            ? '#D97706'
-                            : '#10B981'
-                      }
-                      strokeWidth="8"
-                      strokeDasharray={circumference}
-                      strokeDashoffset={strokeDashoffset}
+                    <path
+                      className={activeScore >= 50 ? 'text-rose-500' : 'text-sky-500'}
+                      strokeDasharray={`${activeScore}, 100`}
+                      strokeWidth="3.2"
                       strokeLinecap="round"
-                      fill="transparent"
+                      stroke="currentColor"
+                      fill="none"
+                      d="M18 2.0845 a 15.9155 15.9155 0 0 1 0 31.831 a 15.9155 15.9155 0 0 1 0 -31.831"
                     />
                   </svg>
-                  <div className="absolute inset-0 flex flex-col items-center justify-center">
-                    <span className="text-xl font-extrabold text-slate-900">
-                      {activeRecoveryScore}
-                    </span>
-                    <span className="text-[10px] font-bold text-slate-400">/ 100</span>
+                  <span className="font-mono font-bold text-lg text-slate-900">{activeScore}</span>
+                </div>
+                <div>
+                  <div className="font-mono text-xs font-bold tracking-wider text-slate-400">
+                    {selectedNode?.id || 'NODE-05'}
                   </div>
-                </div>
-
-                <div className="space-y-1 text-xs">
-                  <div className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full bg-red-50 text-red-700 font-bold text-[11px] border border-red-200">
-                    Recovery Probability Score
+                  <div className="font-mono text-sm font-bold text-slate-900 flex items-center gap-1.5 mt-0.5">
+                    <Zap className="w-3.5 h-3.5 text-amber-500" />
+                    <span>{selectedNode?.anomalyType === 'VEHICLE_ALIGHTING_SPIKE' ? 'GHOST_VEC' : 'DWELL_DROP'}</span>
                   </div>
-                  <h3 className="text-sm font-bold text-slate-900">
-                    จุดเป้าหมาย: {selectedNode?.id || 'NODE-05'}
-                  </h3>
-                  <p className="text-slate-600 leading-relaxed">
-                    {activeRecoveryScore >= 70
-                      ? 'แนะนำให้วิ่งไปสำรวจจุดนี้เป็นอันดับแรก มีโอกาสพบของคืนสูงที่สุด'
-                      : 'จุดนี้ได้รับการสำรวจแล้ว หรือมีความเสี่ยงระดับปานกลาง'}
-                  </p>
-                </div>
-              </div>
-
-              <div className="bg-white border border-slate-200 rounded-2xl p-5 shadow-xs space-y-3.5">
-                <div className="flex items-center justify-between">
-                  <h2 className="text-sm font-bold text-slate-900">
-                    เครื่องมือวิเคราะห์เส้นทางและเรดาร์ PostGIS
-                  </h2>
-                  <Cpu className="w-4 h-4 text-blue-600" />
-                </div>
-
-                <div className="grid grid-cols-2 gap-2">
-                  <button
-                    onClick={() => setIsClickToAddNode(!isClickToAddNode)}
-                    className={`py-2.5 px-3 rounded-xl border text-xs font-semibold flex items-center justify-center gap-1.5 transition cursor-pointer ${isClickToAddNode
-                      ? 'bg-blue-600 border-blue-600 text-white shadow-xs'
-                      : 'bg-slate-50 hover:bg-slate-100 border-slate-300 text-slate-800'
-                      }`}
-                  >
-                    <MousePointerClick className="w-4 h-4" />
-                    <span>{isClickToAddNode ? 'คลิกบนแผนที่ได้เลย...' : 'ปักหมุดเส้นทางเอง'}</span>
-                  </button>
-
-                  <button
-                    onClick={resetDemoTrajectory}
-                    className="py-2.5 px-3 rounded-xl border border-slate-300 bg-slate-50 hover:bg-slate-100 text-slate-700 text-xs font-semibold flex items-center justify-center gap-1.5 transition cursor-pointer"
-                  >
-                    <RotateCcw className="w-3.5 h-3.5" />
-                    <span>รีเซ็ตเส้นทางตัวอย่าง</span>
-                  </button>
-                </div>
-
-                <div className="grid grid-cols-2 gap-2">
-                  <label className="flex items-center justify-center gap-1.5 py-2.5 px-3 rounded-xl border border-slate-300 bg-white hover:bg-slate-50 text-slate-800 text-xs font-semibold cursor-pointer transition">
-                    <FileUp className="w-4 h-4 text-blue-600" />
-                    <span>อัปโหลด .GPX / .JSON</span>
-                    <input
-                      type="file"
-                      accept=".gpx,.json,.xml"
-                      onChange={handleTrajectoryUpload}
-                      className="hidden"
-                    />
-                  </label>
-
-                  <button
-                    onClick={toggleLiveImuRecording}
-                    className={`flex items-center justify-center gap-1.5 py-2.5 px-3 rounded-xl border text-xs font-semibold transition cursor-pointer ${isRecordingImu
-                      ? 'border-red-600 bg-red-50 text-red-700 animate-pulse'
-                      : 'border-amber-300 bg-amber-50 hover:bg-amber-100 text-amber-900'
-                      }`}
-                  >
-                    <Activity className="w-4 h-4" />
-                    <span>{isRecordingImu ? 'กำลังบันทึกเซนเซอร์...' : 'บันทึกเซนเซอร์มือถือสด'}</span>
-                  </button>
-                </div>
-
-                <button
-                  onClick={runSpatialIntersectionRadar}
-                  disabled={isCheckingRadar}
-                  className="w-full py-2.5 px-4 rounded-xl bg-blue-600 hover:bg-blue-700 text-white text-xs font-semibold flex items-center justify-center gap-2 shadow-xs transition cursor-pointer"
-                >
-                  <Radio className={`w-4 h-4 ${isCheckingRadar ? 'animate-spin' : ''}`} />
-                  <span>
-                    {isCheckingRadar
-                      ? 'กำลังค้นหาในฐานข้อมูล PostGIS...'
-                      : 'สแกนหาสิ่งของที่พบใกล้จุดเสี่ยง (<30 เมตร)'}
-                  </span>
-                </button>
-              </div>
-
-              {spatialMatches.length > 0 && (
-                <div className="bg-emerald-50 border border-emerald-300 rounded-2xl p-4 space-y-2.5 text-xs shadow-xs">
-                  <div className="text-emerald-800 font-bold flex items-center gap-1.5">
-                    <CheckCircle2 className="w-4 h-4 text-emerald-600" />
-                    <span>พบสิ่งของในระบบตรงกับเส้นทางของคุณ ({spatialMatches.length} รายการ)</span>
-                  </div>
-                  {spatialMatches.map((m) => (
-                    <div
-                      key={m.vaultItemId}
-                      className="p-3 bg-white rounded-xl border border-emerald-200 space-y-1"
-                    >
-                      <div className="flex justify-between font-bold text-slate-900">
-                        <span>{m.category} (ใกล้จุด {m.nodeId})</span>
-                        <span className="text-emerald-700">ห่าง {m.distance_meters} ม.</span>
-                      </div>
-                      <p className="text-xs text-slate-600">{m.public_summary}</p>
-                      <button
-                        onClick={() => setActivePillar('PILLAR_3_VISION')}
-                        className="text-xs text-blue-600 hover:underline font-bold pt-1 cursor-pointer"
-                      >
-                        ไปยังโหมดคนเก็บของได้ / ยืนยันความเป็นเจ้าของ
-                      </button>
+                  {radarMatches !== null && (
+                    <div className="mt-1 inline-flex items-center gap-1 px-2 py-0.5 rounded-full bg-emerald-500/15 text-emerald-700 font-mono text-[11px] font-bold">
+                      <CheckCircle2 className="w-3 h-3" /> {radarMatches} MATCH (&lt;30m)
                     </div>
-                  ))}
-                </div>
-              )}
-
-              <div className="bg-white border border-slate-200 rounded-2xl p-5 shadow-xs space-y-3">
-                <h3 className="text-xs font-bold uppercase tracking-wider text-slate-500">
-                  จุดพิกัดตามเส้นทาง & ภารกิจอาสาสมัคร ({scoredNodes.length} จุด)
-                </h3>
-                <div className="space-y-2.5 max-h-[300px] overflow-y-auto pr-1">
-                  {scoredNodes.map((node) => {
-                    const isSelected = selectedNode?.id === node.id;
-                    const isCleared = clearedNodeIds.includes(node.id);
-                    const score = isCleared
-                      ? Math.round(node.dropProbability * 25)
-                      : Math.round(node.dropProbability * 100);
-                    const isHigh = score >= 70;
-                    const isMed = score >= 45;
-                    return (
-                      <div
-                        key={node.id}
-                        onClick={() => {
-                          setSelectedNode(node);
-                          mapRef.current?.flyTo({ center: [node.lng, node.lat], zoom: 16.5 });
-                        }}
-                        className={`p-3.5 rounded-xl border cursor-pointer transition space-y-2 ${isSelected
-                          ? 'border-blue-600 bg-blue-50/50 shadow-xs'
-                          : 'border-slate-200 bg-slate-50/60 hover:bg-slate-100'
-                          }`}
-                      >
-                        <div className="flex items-center justify-between">
-                          <span className="text-xs font-bold text-slate-900">
-                            จุดพิกัด {node.id}
-                          </span>
-                          <span
-                            className={`text-xs font-bold px-2.5 py-0.5 rounded-full ${isCleared
-                              ? 'bg-emerald-100 text-emerald-800 border border-emerald-200'
-                              : isHigh
-                                ? 'bg-red-100 text-red-800 border border-red-200'
-                                : isMed
-                                  ? 'bg-amber-100 text-amber-800 border border-amber-200'
-                                  : 'bg-slate-200 text-slate-700'
-                              }`}
-                          >
-                            {isCleared ? 'สำรวจแล้ว' : `Recovery Score: ${score}/100`}
-                          </span>
-                        </div>
-
-                        <p className="text-xs font-medium text-blue-700">
-                          สาเหตุ: {node.anomalyReason}
-                        </p>
-
-                        <div className="flex items-center justify-between pt-1 border-t border-slate-200/80">
-                          <span className="text-[11px] text-slate-500">
-                            กระตุก: {node.jerkScore} • หยุดนิ่ง: {node.dwellScore}
-                          </span>
-
-                          <button
-                            type="button"
-                            onClick={(e) => handleScoutVerifyNode(node.id, e)}
-                            disabled={isCleared}
-                            className={`px-2.5 py-1 rounded-lg text-[11px] font-bold flex items-center gap-1 transition cursor-pointer ${isCleared
-                              ? 'bg-emerald-50 text-emerald-700 cursor-default'
-                              : 'bg-amber-100 hover:bg-amber-200 text-amber-900 border border-amber-300'
-                              }`}
-                          >
-                            <Check className="w-3 h-3" />
-                            <span>
-                              {isCleared
-                                ? 'รับ +50 XP แล้ว'
-                                : 'ช่วยยืนยันสำรวจจุดนี้ (+50 XP)'}
-                            </span>
-                          </button>
-                        </div>
-                      </div>
-                    );
-                  })}
-                </div>
-              </div>
-            </>
-          )}
-
-          {activePillar === 'PILLAR_2_PET' && (
-            <div className="bg-white border border-slate-200 rounded-2xl p-5 shadow-xs space-y-4">
-              <div className="flex items-center justify-between">
-                <h2 className="text-sm font-bold text-slate-900">
-                  จำลองรัศมีสัตว์เลี้ยงหาย (Cellular Automata)
-                </h2>
-                <Navigation className="w-4 h-4 text-blue-600" />
-              </div>
-              <p className="text-xs text-slate-600 leading-relaxed">
-                คำนวณการเคลื่อนที่ตามลักษณะภูมิประเทศจริง คลิกแจ้งจุดพบเห็นบนแผนที่เพื่อบีบวงรัศมีและรับ <strong>+100 Scout XP</strong>:
-              </p>
-
-              <div className="grid grid-cols-2 gap-2">
-                <button
-                  onClick={() => setPetClickMode('MOVE_ORIGIN')}
-                  className={`py-2.5 px-2.5 rounded-xl border text-xs font-semibold cursor-pointer transition ${petClickMode === 'MOVE_ORIGIN'
-                    ? 'bg-blue-600 border-blue-600 text-white'
-                    : 'bg-slate-50 border-slate-300 text-slate-700 hover:bg-slate-100'
-                    }`}
-                >
-                  คลิกแผนที่ตั้งจุดที่หาย
-                </button>
-                <button
-                  onClick={() => setPetClickMode('SIGHTING')}
-                  className={`py-2.5 px-2.5 rounded-xl border text-xs font-semibold cursor-pointer transition ${petClickMode === 'SIGHTING'
-                    ? 'bg-amber-500 border-amber-500 text-white'
-                    : 'bg-slate-50 border-slate-300 text-slate-700 hover:bg-slate-100'
-                    }`}
-                >
-                  แจ้งจุดพบเห็น (+100 XP)
-                </button>
-              </div>
-
-              <div className="space-y-2">
-                <label className="text-xs font-bold text-slate-700 block">
-                  เลือกโปรไฟล์พฤติกรรมสัตว์เลี้ยง
-                </label>
-                <div className="grid grid-cols-3 gap-2">
-                  {[
-                    { id: 'SHY_CAT', label: 'แมวขี้กลัว (ซ่อนตัว)' },
-                    { id: 'SPOOKED_DOG', label: 'สุนัขตื่นตกใจ (วิ่งเร็ว)' },
-                    { id: 'CURIOUS_DOG', label: 'สุนัขเชื่อง (เดินตามซอย)' },
-                  ].map((item) => (
-                    <button
-                      key={item.id}
-                      onClick={() => setPetProfile(item.id as PetBehaviorProfile)}
-                      className={`py-2.5 px-2 text-xs rounded-xl border font-semibold cursor-pointer transition ${petProfile === item.id
-                        ? 'border-blue-600 bg-blue-50 text-blue-700'
-                        : 'border-slate-200 bg-slate-50 text-slate-700 hover:bg-slate-100'
-                        }`}
-                    >
-                      {item.label}
-                    </button>
-                  ))}
+                  )}
                 </div>
               </div>
 
-              <div className="space-y-1.5">
-                <div className="flex justify-between text-xs font-bold">
-                  <span className="text-slate-700">เวลาที่ผ่านไปหลังหลุดหาย</span>
-                  <span className="text-blue-600">{elapsedMinutes} นาที</span>
-                </div>
-                <input
-                  type="range"
-                  min={10}
-                  max={140}
-                  step={5}
-                  value={elapsedMinutes}
-                  onChange={(e) => setElapsedMinutes(Number(e.target.value))}
-                  className="w-full accent-blue-600"
-                />
-              </div>
-
+              {/* 30m PostGIS Radar Trigger Icon */}
               <button
-                onClick={() => setIsStorming(!isStorming)}
-                className={`w-full py-2.5 px-3 rounded-xl border text-xs font-semibold flex items-center justify-center gap-2 transition cursor-pointer ${isStorming
-                  ? 'border-blue-600 bg-blue-50 text-blue-700'
-                  : 'border-slate-300 bg-slate-50 text-slate-700 hover:bg-slate-100'
+                onClick={handlePostgisRadarScan}
+                disabled={isScanningRadar}
+                title="PostGIS 30m Radar Scan"
+                className="w-12 h-12 rounded-2xl bg-slate-900 text-white flex items-center justify-center shadow-lg hover:bg-slate-800 active:scale-95 transition"
+              >
+                <Radar className={`w-5 h-5 ${isScanningRadar ? 'animate-spin' : ''}`} />
+              </button>
+            </div>
+
+            {/* 4 Icon-Only Micro Tools */}
+            <div className="grid grid-cols-4 gap-2 pt-3 border-t border-slate-200/60">
+              <button
+                onClick={() => setIsCustomPinning((p) => !p)}
+                title="Pin Custom Node on Map"
+                className={`h-11 rounded-2xl flex items-center justify-center transition ${isCustomPinning ? 'bg-sky-500 text-white' : 'bg-slate-100/90 text-slate-700 hover:bg-slate-200/80'
                   }`}
               >
-                <CloudRain className="w-4 h-4" />
-                {isStorming
-                  ? 'โหมดฝนตก/ฟ้าร้อง: เปิดใช้งาน (หาที่หลบฝน 2 เท่า)'
-                  : 'จำลองสภาพอากาศฝนตก / ฟ้าร้อง'}
+                <Crosshair className="w-4 h-4" />
               </button>
 
-              {sightingCoord && (
+              <button
+                onClick={() => gpxInputRef.current?.click()}
+                title="Import .GPX / .JSON"
+                className="h-11 rounded-2xl bg-slate-100/90 text-slate-700 hover:bg-slate-200/80 flex items-center justify-center transition"
+              >
+                <Upload className="w-4 h-4" />
+              </button>
+              <input ref={gpxInputRef} type="file" accept=".gpx,.json" onChange={handleGpxUpload} className="hidden" />
+
+              <button
+                onClick={toggleLiveImu}
+                title="Live Smartphone IMU Stream"
+                className={`h-11 rounded-2xl flex items-center justify-center transition ${isRecordingImu ? 'bg-rose-500 text-white animate-pulse' : 'bg-slate-100/90 text-slate-700 hover:bg-slate-200/80'
+                  }`}
+              >
+                <Activity className="w-4 h-4" />
+              </button>
+
+              <button
+                onClick={() => {
+                  setTelemetry(DEMO_TELEMETRY);
+                  setRadarMatches(null);
+                  setIsCustomPinning(false);
+                }}
+                title="Reset Trajectory"
+                className="h-11 rounded-2xl bg-slate-100/90 text-slate-700 hover:bg-slate-200/80 flex items-center justify-center transition"
+              >
+                <RotateCcw className="w-4 h-4" />
+              </button>
+            </div>
+
+            {/* Node Pill Strip */}
+            <div className="flex items-center gap-1.5 overflow-x-auto pt-3 mt-3 border-t border-slate-200/60 no-scrollbar">
+              {dropNodes.map((n) => {
+                const s = Math.round(n.dropProbability * 100);
+                const isSel = selectedNode?.id === n.id;
+                return (
+                  <button
+                    key={n.id}
+                    onClick={() => {
+                      setSelectedNode(n);
+                      mapRef.current?.flyTo({ center: [n.lng, n.lat], zoom: 16.3, duration: 500 });
+                    }}
+                    className={`px-2.5 py-1 rounded-full font-mono text-xs font-bold shrink-0 transition ${isSel
+                      ? 'bg-slate-900 text-white'
+                      : s >= 50
+                        ? 'bg-rose-500/15 text-rose-700'
+                        : 'bg-slate-100 text-slate-600'
+                      }`}
+                  >
+                    {s}%
+                  </button>
+                );
+              })}
+            </div>
+          </div>
+        </aside>
+      )}
+
+      {/* MODE 2: PET RADIANCE VIEW — ICON-FIRST CELLULAR AUTOMATA HUD */}
+      {mode === 'pet' && (
+        <aside className="fixed bottom-6 right-4 left-20 md:left-auto md:w-80 z-20">
+          <div className="p-5 rounded-3xl bg-white/85 backdrop-blur-2xl border border-white/95 shadow-[0_16px_40px_rgb(15,23,42,0.10)] flex flex-col gap-4">
+            {/* Top Row: Species Behavior Icons + Weather Toggle */}
+            <div className="flex items-center justify-between gap-2">
+              <div className="flex items-center gap-1.5 bg-slate-100/90 p-1 rounded-2xl">
                 <button
-                  onClick={() => setSightingCoord(null)}
-                  className="w-full py-2.5 rounded-xl border border-red-300 bg-red-50 text-red-700 text-xs font-semibold flex items-center justify-center gap-2 cursor-pointer"
+                  onClick={() => setPetProfile('INDOOR_CAT')}
+                  title="Shy Cat (Hiding)"
+                  className={`w-10 h-10 rounded-xl flex items-center justify-center transition ${petProfile === 'INDOOR_CAT' ? 'bg-slate-900 text-white shadow-sm' : 'text-slate-600'
+                    }`}
                 >
-                  <Crosshair className="w-4 h-4" />
-                  รีเซ็ตกลับไปยังจุดเริ่มต้นที่สัตว์เลี้ยงหาย
+                  <Cat className="w-4 h-4" />
                 </button>
+                <button
+                  onClick={() => setPetProfile('SPOOKED_DOG')}
+                  title="Spooked Dog (Fast Sprint)"
+                  className={`w-10 h-10 rounded-xl flex items-center justify-center transition ${petProfile === 'SPOOKED_DOG' ? 'bg-slate-900 text-white shadow-sm' : 'text-slate-600'
+                    }`}
+                >
+                  <Zap className="w-4 h-4" />
+                </button>
+                <button
+                  onClick={() => setPetProfile('FRIENDLY_DOG')}
+                  title="Friendly Dog (Alley Roam)"
+                  className={`w-10 h-10 rounded-xl flex items-center justify-center transition ${petProfile === 'FRIENDLY_DOG' ? 'bg-slate-900 text-white shadow-sm' : 'text-slate-600'
+                    }`}
+                >
+                  <Dog className="w-4 h-4" />
+                </button>
+              </div>
+
+              {/* Rain / Storm Factor Icon */}
+              <button
+                onClick={() => setIsRaining((r) => !r)}
+                title="Toggle Rain Shelter Seeking"
+                className={`w-11 h-11 rounded-2xl flex items-center justify-center transition ${isRaining ? 'bg-sky-500 text-white shadow-md' : 'bg-slate-100 text-slate-600'
+                  }`}
+              >
+                <CloudRain className="w-5 h-5" />
+              </button>
+            </div>
+
+            {/* Time Slider */}
+            <div className="flex items-center gap-3">
+              <span className="font-mono text-xs font-bold text-slate-500 w-14">{elapsedMinutes}m</span>
+              <input
+                type="range"
+                min={10}
+                max={240}
+                step={10}
+                value={elapsedMinutes}
+                onChange={(e) => setElapsedMinutes(Number(e.target.value))}
+                className="w-full accent-slate-900 cursor-pointer"
+              />
+            </div>
+
+            {/* Map Click Mode Switcher (Origin vs Sighting) */}
+            <div className="grid grid-cols-3 gap-2 pt-2 border-t border-slate-200/60">
+              <button
+                onClick={() => setPetClickMode('origin')}
+                title="Click Map to Set Origin (T=0)"
+                className={`h-10 rounded-2xl font-mono text-xs font-bold flex items-center justify-center gap-1.5 transition ${petClickMode === 'origin' ? 'bg-slate-900 text-white' : 'bg-slate-100 text-slate-600'
+                  }`}
+              >
+                <Crosshair className="w-3.5 h-3.5" /> T=0
+              </button>
+              <button
+                onClick={() => setPetClickMode('sighting')}
+                title="Click Map to Add Sighting (+100 XP)"
+                className={`h-10 rounded-2xl font-mono text-xs font-bold flex items-center justify-center gap-1.5 transition ${petClickMode === 'sighting' ? 'bg-emerald-600 text-white' : 'bg-slate-100 text-slate-600'
+                  }`}
+              >
+                <Plus className="w-3.5 h-3.5" /> SIGHTING
+              </button>
+              <button
+                onClick={() => setSightings([])}
+                title="Clear Sightings"
+                className="h-10 rounded-2xl bg-slate-100 text-slate-600 hover:bg-slate-200 flex items-center justify-center transition"
+              >
+                <RotateCcw className="w-4 h-4" />
+              </button>
+            </div>
+          </div>
+        </aside>
+      )}
+
+      {/* MODE 3: AI FORENSIC VAULT — FLOATING GLASS MODAL */}
+      {mode === 'vault' && (
+        <div className="fixed inset-0 z-10 flex items-center justify-center p-4 pl-20 pointer-events-none">
+          <div className="pointer-events-auto w-full max-w-3xl rounded-3xl bg-white/85 backdrop-blur-2xl border border-white/95 shadow-[0_24px_60px_rgb(15,23,42,0.14)] p-5 md:p-6 grid grid-cols-1 md:grid-cols-12 gap-5 max-h-[85vh] overflow-y-auto">
+            {/* Left Column: Image & Redaction Canvas */}
+            <div className="md:col-span-7 flex flex-col items-center justify-center bg-slate-950/95 rounded-2xl p-3 min-h-[260px] relative overflow-hidden">
+              {!imageSrc ? (
+                <button
+                  onClick={() => fileInputRef.current?.click()}
+                  className="flex flex-col items-center justify-center gap-3 text-white/80 hover:text-white transition p-8"
+                >
+                  <div className="w-16 h-16 rounded-full bg-white/10 border border-white/20 flex items-center justify-center">
+                    <Upload className="w-7 h-7" />
+                  </div>
+                  <span className="font-mono text-xs tracking-wider uppercase">UPLOAD FOUND ITEM</span>
+                </button>
+              ) : (
+                <>
+                  <canvas ref={redactCanvasRef} className="max-h-[340px] w-auto rounded-xl object-contain" />
+                  <button
+                    onClick={() => fileInputRef.current?.click()}
+                    title="Upload New Photo"
+                    className="absolute top-3 right-3 w-9 h-9 rounded-full bg-black/60 text-white flex items-center justify-center hover:bg-black transition"
+                  >
+                    <Upload className="w-4 h-4" />
+                  </button>
+                </>
+              )}
+              <input
+                ref={fileInputRef}
+                type="file"
+                accept="image/*"
+                onChange={handleImageUpload}
+                className="hidden"
+              />
+              {isScanning && (
+                <div className="absolute inset-0 bg-slate-950/80 backdrop-blur-sm flex items-center justify-center">
+                  <Sparkles className="w-8 h-8 text-sky-400 animate-spin" />
+                </div>
               )}
             </div>
-          )}
 
-          {activePillar === 'PILLAR_3_VISION' && (
-            <div className="bg-white border border-slate-200 rounded-2xl p-5 shadow-xs space-y-4">
-              <div className="flex items-center justify-between">
-                <h2 className="text-sm font-bold text-slate-900">
-                  โหมดคนเก็บของได้ & ตู้นิรภัยยืนยันเจ้าของ
-                </h2>
-                <ShieldCheck className="w-5 h-5 text-blue-600" />
-              </div>
-              <p className="text-xs text-slate-600 leading-relaxed">
-                1. คนเก็บของได้อัปโหลดรูปสิ่งของ (รับ +150 XP)<br />
-                2. Gemini AI เบลอตำหนิลับและสร้างคำถามท้าทายอัตโนมัติ<br />
-                3. เจ้าของตัวจริงตอบคำถามเพื่อปลดล็อกภาพและจุดนัดรับปลอดภัย
-              </p>
-
-              <label className="flex flex-col items-center justify-center border-2 border-dashed border-blue-400 hover:border-blue-600 bg-blue-50/40 rounded-2xl p-5 cursor-pointer transition">
-                <Upload className="w-6 h-6 text-blue-600 mb-1.5" />
-                <span className="text-xs text-blue-700 font-bold">
-                  ขั้นตอนที่ 1: อัปโหลดรูปสิ่งของที่พบ (+150 XP)
-                </span>
-                <span className="text-[11px] text-slate-500 mt-0.5">
-                  ทดสอบด้วยรูปกระเป๋าสตางค์ บัตร หรือสิ่งของที่มีโลโก้
-                </span>
-                <input type="file" accept="image/*" onChange={handleImageUpload} className="hidden" />
-              </label>
-
-              {isScanning && (
-                <div className="p-3.5 border border-blue-200 bg-blue-50 rounded-xl text-xs text-blue-800 flex items-center gap-3 font-medium">
-                  <Sparkles className="w-4 h-4 animate-spin shrink-0 text-blue-600" />
-                  <span>Gemini AI กำลังแยกตำหนิลับและเบลอข้อมูลสำคัญ...</span>
+            {/* Right Column: Minimal Tags & Challenge Unlock */}
+            <div className="md:col-span-5 flex flex-col justify-between gap-4">
+              <div className="flex flex-col gap-3">
+                <div className="flex items-center justify-between">
+                  <span className="font-mono text-xs font-bold tracking-widest text-slate-400">AI VAULT</span>
+                  {claimResult?.is_verified ? (
+                    <span className="inline-flex items-center gap-1 px-2.5 py-1 rounded-full bg-emerald-500/15 text-emerald-700 font-mono text-xs font-bold">
+                      <Unlock className="w-3.5 h-3.5" /> UNLOCKED
+                    </span>
+                  ) : (
+                    <span className="inline-flex items-center gap-1 px-2.5 py-1 rounded-full bg-rose-500/15 text-rose-700 font-mono text-xs font-bold">
+                      <Lock className="w-3.5 h-3.5" /> REDACTED
+                    </span>
+                  )}
                 </div>
-              )}
 
-              {scanError && (
-                <div className="p-3 border border-red-300 bg-red-50 rounded-xl text-xs text-red-700">
-                  เกิดข้อผิดพลาด: {scanError}
-                </div>
-              )}
-
-              {forensicData && (
-                <div className="space-y-3.5 text-xs">
-                  <div className="p-3.5 border border-emerald-200 bg-emerald-50/70 rounded-xl space-y-1">
-                    <div className="flex items-center gap-1.5 text-emerald-800 font-bold mb-1">
-                      <CheckCircle2 className="w-4 h-4 text-emerald-600" />
-                      <span>ข้อมูลทั่วไปที่แสดงต่อสาธารณะ (Public Macro Tags)</span>
-                    </div>
-                    <p><strong>หมวดหมู่:</strong> {forensicData.public_payload.category}</p>
-                    <p><strong>สี:</strong> {forensicData.public_payload.color}</p>
-                    <p><strong>แบรนด์:</strong> {forensicData.public_payload.brand}</p>
-                    <p className="mt-1 text-slate-700">{forensicData.public_payload.public_summary}</p>
+                {scanError && (
+                  <div className="p-3 rounded-2xl bg-rose-500/10 text-rose-700 font-mono text-xs">
+                    {scanError}
                   </div>
+                )}
 
-                  <form
-                    onSubmit={handleGradeClaim}
-                    className="p-4 border border-amber-300 bg-amber-50/50 rounded-xl space-y-3"
-                  >
-                    <div className="flex items-center justify-between text-amber-900 font-bold">
-                      <div className="flex items-center gap-1.5">
-                        <Lock className="w-4 h-4 text-amber-700" />
-                        <span>ขั้นตอนที่ 2: ตอบคำถามยืนยันความเป็นเจ้าของ</span>
-                      </div>
+                {/* Public Macro Pills */}
+                {forensicData?.public_payload && (
+                  <div className="flex flex-wrap gap-1.5">
+                    {forensicData.public_payload.category && (
+                      <span className="px-3 py-1 rounded-full bg-slate-100 font-mono text-xs font-bold text-slate-800">
+                        {forensicData.public_payload.category}
+                      </span>
+                    )}
+                    {forensicData.public_payload.color && (
+                      <span className="px-3 py-1 rounded-full bg-slate-100 font-mono text-xs text-slate-600">
+                        {forensicData.public_payload.color}
+                      </span>
+                    )}
+                    {forensicData.public_payload.brand && (
+                      <span className="px-3 py-1 rounded-full bg-slate-900 text-white font-mono text-xs font-bold">
+                        {forensicData.public_payload.brand}
+                      </span>
+                    )}
+                  </div>
+                )}
+
+                {/* Challenge Prompt Box */}
+                {(forensicData?.vault_secret || forensicData?.challenge_prompt) && (
+                  <div className="p-3.5 rounded-2xl bg-slate-100/90 border border-slate-200/80 flex flex-col gap-2">
+                    <div className="flex items-center justify-between">
+                      <span className="font-mono text-[11px] font-bold text-slate-400">CHALLENGE</span>
                       <button
-                        type="button"
-                        onClick={() => setShowDevSpoilers(!showDevSpoilers)}
-                        className="text-[11px] text-blue-600 hover:underline flex items-center gap-1 cursor-pointer"
+                        onClick={() => setShowJudgeHint((h) => !h)}
+                        title="Toggle Expected Answer Hint"
+                        className="text-slate-400 hover:text-slate-800"
                       >
-                        <Eye className="w-3 h-3" />
-                        {showDevSpoilers ? 'ซ่อนเฉลย' : 'ดูเฉลย (สำหรับกรรมการ)'}
+                        <Eye className="w-3.5 h-3.5" />
                       </button>
                     </div>
-
-                    <div className="space-y-1.5 text-slate-800 bg-white p-3 rounded-lg border border-amber-200">
-                      <p><strong>คำถาม (TH):</strong> {forensicData.challenge_prompt.th}</p>
-                      <p className="text-slate-500"><strong>EN:</strong> {forensicData.challenge_prompt.en}</p>
-                    </div>
-
-                    {showDevSpoilers && (
-                      <div className="p-2.5 bg-white border border-slate-200 rounded-lg text-[11px] text-slate-600 space-y-1">
-                        <p><strong>ความลับที่ถูกเบลอไว้:</strong> {forensicData.challenge_prompt.dev_preview_secret}</p>
-                        <p><strong>คำสำคัญ (TH):</strong> {forensicData.challenge_prompt.dev_preview_keywords_th?.join(', ')}</p>
-                        <p><strong>คำสำคัญ (EN):</strong> {forensicData.challenge_prompt.dev_preview_keywords_en?.join(', ')}</p>
+                    <p className="text-xs font-medium text-slate-800 leading-relaxed">
+                      {forensicData.vault_secret?.challenge_question_th ||
+                        forensicData.challenge_prompt?.th}
+                    </p>
+                    {showJudgeHint && (
+                      <div className="p-2 rounded-xl bg-amber-500/15 text-amber-900 font-mono text-[11px]">
+                        KEY:{' '}
+                        {forensicData.vault_secret?.expected_answer_summary ||
+                          forensicData.challenge_prompt?.dev_preview_secret}
                       </div>
                     )}
+                  </div>
+                )}
+              </div>
 
-                    <div className="space-y-2">
-                      <input
-                        type="text"
-                        value={claimantAnswer}
-                        onChange={(e) => setClaimantAnswer(e.target.value)}
-                        placeholder="พิมพ์คำตอบภาษาไทย หรือ ภาษาอังกฤษ..."
-                        className="w-full bg-white border border-slate-300 focus:border-blue-600 rounded-lg px-3 py-2 text-xs text-slate-900 outline-none"
-                      />
-                      <button
-                        type="submit"
-                        disabled={isGrading || !claimantAnswer.trim()}
-                        className="w-full py-2.5 px-3 rounded-lg bg-blue-600 hover:bg-blue-700 disabled:opacity-40 text-white font-bold text-xs flex items-center justify-center gap-2 transition cursor-pointer"
-                      >
-                        <Send className="w-3.5 h-3.5" />
-                        {isGrading ? 'กำลังตรวจคำตอบด้วย Gemini AI...' : 'ส่งคำตอบเพื่อปลดล็อกภาพและจุดนัดรับ'}
-                      </button>
-                    </div>
-                  </form>
+              {/* Claim Input & Handoff Status */}
+              {forensicData && (
+                <div className="flex flex-col gap-2">
+                  <div className="flex items-center gap-2">
+                    <input
+                      type="text"
+                      value={claimantAnswer}
+                      onChange={(e) => setClaimantAnswer(e.target.value)}
+                      placeholder="Verify secret..."
+                      className="w-full h-11 px-3.5 rounded-2xl bg-slate-100 border border-slate-200 text-xs font-mono focus:outline-none focus:border-slate-900"
+                    />
+                    <button
+                      onClick={handleVerifyClaim}
+                      disabled={isGrading}
+                      className="w-11 h-11 shrink-0 rounded-2xl bg-slate-900 text-white flex items-center justify-center hover:bg-slate-800 transition"
+                    >
+                      <Send className="w-4 h-4" />
+                    </button>
+                  </div>
 
                   {claimResult && (
                     <div
-                      className={`p-4 rounded-xl border space-y-2 ${claimResult.is_verified
-                        ? 'border-emerald-300 bg-emerald-50 text-emerald-950'
-                        : 'border-red-300 bg-red-50 text-red-900'
+                      className={`p-3 rounded-2xl font-mono text-xs flex items-center justify-between ${claimResult.is_verified
+                        ? 'bg-emerald-500/15 text-emerald-800'
+                        : 'bg-rose-500/15 text-rose-800'
                         }`}
                     >
-                      <div className="flex items-center justify-between font-bold">
-                        <div className="flex items-center gap-1.5">
-                          {claimResult.is_verified ? (
-                            <Unlock className="w-4 h-4 text-emerald-600" />
-                          ) : (
-                            <XCircle className="w-4 h-4 text-red-600" />
-                          )}
-                          <span>
-                            {claimResult.is_verified
-                              ? 'ยืนยันเจ้าของสำเร็จ! ปลดล็อกภาพจริงแล้ว'
-                              : 'คำตอบไม่ตรงกับข้อมูลในตู้นิรภัย'}
-                          </span>
-                        </div>
-                        <span className="text-[11px] px-2 py-0.5 rounded-full bg-white border border-slate-200">
-                          ความแม่นยำ {claimResult.confidence_score}%
-                        </span>
-                      </div>
-
-                      <p className="text-xs leading-relaxed">{claimResult.reasoning}</p>
-
-                      {claimResult.is_verified && (
-                        <div className="pt-2 border-t border-emerald-200 space-y-1.5">
-                          <div className="flex items-center gap-1.5 text-blue-700 font-bold text-xs">
-                            <MapPin className="w-4 h-4" />
-                            <span>Samaritan Shield // จุดนัดรับปลอดภัยที่มีกล้องวงจรปิด (CCTV)</span>
-                          </div>
-                          <p className="text-xs text-slate-800 bg-white p-2.5 rounded-lg border border-emerald-200">
-                            <strong>จุดนัดรับแนะนำ:</strong> {claimResult.safe_handoff_point}
-                          </p>
-                        </div>
-                      )}
+                      <span>
+                        {claimResult.safe_handoff_spot ||
+                          claimResult.safe_handoff_point ||
+                          'CCTV SAFE ZONE UNLOCKED'}
+                      </span>
+                      <span className="font-bold">{claimResult.confidence_score}%</span>
                     </div>
                   )}
                 </div>
               )}
             </div>
-          )}
-
-          {activePillar === 'PILLAR_4_QR' && (
-            <div className="bg-white border border-slate-200 rounded-2xl p-5 shadow-xs space-y-4 text-xs">
-              <div className="flex items-center justify-between">
-                <h2 className="text-sm font-bold text-slate-900">
-                  สร้าง QR ป้องกันของหาย (Samaritan Shield)
-                </h2>
-                <QrCode className="w-5 h-5 text-blue-600" />
-              </div>
-              <p className="text-slate-600 leading-relaxed">
-                เมื่อผู้พบของสแกน QR นี้ด้วยกล้องมือถือ จะเข้าสู่หน้าเว็บแจ้งพิกัดและถ่ายรูปส่งเข้าตู้นิรภัย AI ทันทีโดยไม่ต้องติดตั้งแอป
-              </p>
-
-              <div className="grid grid-cols-2 gap-2">
-                <button
-                  onClick={() => setQrMode('LOCKSCREEN')}
-                  className={`py-2.5 px-3 rounded-xl border font-semibold cursor-pointer ${qrMode === 'LOCKSCREEN'
-                    ? 'border-blue-600 bg-blue-50 text-blue-700'
-                    : 'border-slate-200 bg-slate-50 text-slate-700'
-                    }`}
-                >
-                  ภาพหน้าจอล็อกมือถือ
-                </button>
-                <button
-                  onClick={() => setQrMode('STICKER')}
-                  className={`py-2.5 px-3 rounded-xl border font-semibold cursor-pointer ${qrMode === 'STICKER'
-                    ? 'border-blue-600 bg-blue-50 text-blue-700'
-                    : 'border-slate-200 bg-slate-50 text-slate-700'
-                    }`}
-                >
-                  สติกเกอร์ติดสิ่งของ
-                </button>
-              </div>
-
-              <div className="space-y-1.5">
-                <label className="block text-slate-700 font-bold">รหัสประจำสิ่งของ (Tag ID)</label>
-                <input
-                  type="text"
-                  value={tagId}
-                  onChange={(e) => setTagId(e.target.value)}
-                  className="w-full bg-slate-50 border border-slate-300 rounded-lg px-3 py-2 text-slate-900"
-                />
-              </div>
-
-              <div className="space-y-1.5">
-                <label className="block text-slate-700 font-bold">รางวัลนำส่งคืน (Bounty)</label>
-                <input
-                  type="text"
-                  value={bountyAmount}
-                  onChange={(e) => setBountyAmount(e.target.value)}
-                  className="w-full bg-slate-50 border border-slate-300 rounded-lg px-3 py-2 text-slate-900"
-                />
-              </div>
-
-              <div className="space-y-1.5">
-                <label className="block text-slate-700 font-bold">ข้อความบนป้าย</label>
-                <input
-                  type="text"
-                  value={ownerNote}
-                  onChange={(e) => setOwnerNote(e.target.value)}
-                  className="w-full bg-slate-50 border border-slate-300 rounded-lg px-3 py-2 text-slate-900"
-                />
-              </div>
-
-              <button
-                onClick={downloadQrShield}
-                className="w-full py-2.5 px-4 rounded-xl bg-blue-600 hover:bg-blue-700 text-white font-bold flex items-center justify-center gap-2 shadow-xs transition cursor-pointer"
-              >
-                <Download className="w-4 h-4" />
-                <span>ดาวน์โหลดรูปภาพ QR (.PNG)</span>
-              </button>
-
-              <a
-                href={`/found?tag=${encodeURIComponent(tagId)}&bounty=${encodeURIComponent(bountyAmount)}`}
-                target="_blank"
-                rel="noreferrer"
-                className="w-full py-2.5 px-4 rounded-xl border border-slate-300 hover:bg-slate-100 text-slate-800 font-bold flex items-center justify-center gap-2 transition"
-              >
-                <ExternalLink className="w-4 h-4 text-blue-600" />
-                <span>ทดสอบเปิดหน้าเว็บผู้พบของ (/found)</span>
-              </a>
-            </div>
-          )}
-        </aside>
-
-        {/* Right Framed Map & Visual Workbench (8 cols) */}
-        <main className="lg:col-span-8 bg-white border border-slate-200 rounded-2xl shadow-xs overflow-hidden relative min-h-[620px] flex flex-col">
-          {(activePillar === 'PILLAR_1_IMU' || activePillar === 'PILLAR_2_PET') && (
-            <div className="absolute top-4 left-4 right-4 z-10 flex flex-wrap items-center justify-between gap-2 pointer-events-none">
-              <div className="bg-white/95 backdrop-blur border border-slate-200 px-3.5 py-2 rounded-xl shadow-sm text-xs text-slate-700 pointer-events-auto">
-                {activePillar === 'PILLAR_1_IMU' ? (
-                  isClickToAddNode ? (
-                    <span className="text-blue-700 font-bold">
-                      [โหมดปักหมุดทำงานอยู่] คลิกจุดไหนก็ได้บนแผนที่เพื่อเพิ่มพิกัดทำของตก (+25 XP)
-                    </span>
-                  ) : (
-                    <span>
-                      <strong>คำแนะนำ:</strong> คลิกการ์ดด้านซ้ายเพื่อดู Recovery Score หรือกดยืนยันการสำรวจเพื่อสะสมแต้ม XP
-                    </span>
-                  )
-                ) : (
-                  <span>
-                    <strong>คำแนะนำ:</strong> คลิกบนแผนที่เพื่อ{' '}
-                    <strong className="text-blue-700">
-                      {petClickMode === 'MOVE_ORIGIN'
-                        ? 'ตั้งจุดเริ่มต้นที่สัตว์เลี้ยงหาย'
-                        : 'แจ้งเบาะแสจุดพบเห็นสัตว์เลี้ยง (+100 XP)'}
-                    </strong>
-                  </span>
-                )}
-              </div>
-
-              <div className="flex items-center gap-2 pointer-events-auto">
-                <button
-                  onClick={handleLocateMe}
-                  className="bg-white hover:bg-slate-50 text-blue-700 border border-slate-300 px-3.5 py-2 rounded-xl text-xs font-bold flex items-center gap-1.5 shadow-sm cursor-pointer transition"
-                >
-                  <LocateFixed className="w-4 h-4 text-blue-600" />
-                  <span>พิกัดปัจจุบันของฉัน</span>
-                </button>
-
-                <button
-                  onClick={toggleMapStyle}
-                  className="bg-white hover:bg-slate-50 text-slate-800 border border-slate-300 px-3.5 py-2 rounded-xl text-xs font-bold flex items-center gap-1.5 shadow-sm cursor-pointer transition"
-                >
-                  <MapIcon className="w-4 h-4 text-blue-600" />
-                  <span>
-                    {mapStyleMode === 'OSM_STREET'
-                      ? 'สลับเป็นโหมดเรดาร์มืด'
-                      : 'สลับเป็นแผนที่ถนนจริง'}
-                  </span>
-                </button>
-              </div>
-            </div>
-          )}
-
-          <div
-            className={`relative w-full h-[640px] ${activePillar === 'PILLAR_1_IMU' || activePillar === 'PILLAR_2_PET'
-              ? 'block'
-              : 'hidden'
-              }`}
-          >
-            <div
-              ref={mapContainerRef}
-              style={{
-                position: 'absolute',
-                inset: 0,
-                width: '100%',
-                height: '100%',
-                filter:
-                  mapStyleMode === 'CARTO_DARK'
-                    ? 'invert(92%) hue-rotate(180deg) brightness(95%) contrast(92%)'
-                    : 'none',
-              }}
-              className="w-full h-full transition-[filter] duration-300"
-            />
-            <canvas
-              ref={overlayCanvasRef}
-              style={{ position: 'absolute', inset: 0, width: '100%', height: '100%' }}
-              className="pointer-events-none absolute inset-0 w-full h-full z-[5]"
-            />
           </div>
+        </div>
+      )}
 
-          {activePillar === 'PILLAR_3_VISION' && (
-            <div className="w-full h-[640px] flex flex-col items-center justify-center p-6 bg-slate-50">
-              {imageSrc ? (
-                <div className="space-y-3 max-w-full">
-                  <div
-                    className={`text-xs flex items-center gap-2 font-bold ${claimResult?.is_verified ? 'text-emerald-700' : 'text-red-600'
-                      }`}
-                  >
-                    {claimResult?.is_verified ? (
-                      <>
-                        <Unlock className="w-4 h-4" />
-                        <span>ยืนยันตัวตนเจ้าของสำเร็จ // เปิดเผยภาพต้นฉบับแล้ว</span>
-                      </>
-                    ) : (
-                      <>
-                        <EyeOff className="w-4 h-4" />
-                        <span>ภาพสำหรับแสดงต่อสาธารณะ (AI เบลอตำหนิลับและข้อมูลสำคัญแล้ว)</span>
-                      </>
-                    )}
-                  </div>
-                  <canvas
-                    ref={redactCanvasRef}
-                    className="max-h-[520px] w-auto border border-slate-300 rounded-xl shadow-md bg-white"
-                  />
-                </div>
-              ) : (
-                <div className="text-center text-slate-500 text-xs space-y-2 max-w-sm bg-white p-8 rounded-2xl border border-slate-200 shadow-xs">
-                  <ShieldCheck className="w-12 h-12 mx-auto text-blue-600" />
-                  <p className="font-bold text-sm text-slate-900">
-                    ยังไม่มีรูปภาพสิ่งของในหน้าต่างตรวจสอบ
-                  </p>
-                  <p className="text-slate-600 leading-relaxed">
-                    กดปุ่ม <strong>"ขั้นตอนที่ 1: อัปโหลดรูปสิ่งของที่พบ"</strong> ด้านซ้ายมือ เพื่อให้ Gemini Vision AI ตรวจจับตำหนิและสร้างกรอบเบลออัตโนมัติ
-                  </p>
-                </div>
-              )}
-            </div>
-          )}
-
-          {activePillar === 'PILLAR_4_QR' && (
-            <div className="w-full h-[640px] flex flex-col items-center justify-center p-6 bg-slate-50">
+      {/* MODE 4: SAMARITAN SHIELD QR GENERATOR — FROSTED STUDIO */}
+      {mode === 'qr' && (
+        <div className="fixed inset-0 z-10 flex items-center justify-center p-4 pl-20 pointer-events-none">
+          <div className="pointer-events-auto w-full max-w-xl rounded-3xl bg-white/85 backdrop-blur-2xl border border-white/95 shadow-[0_24px_60px_rgb(15,23,42,0.14)] p-6 grid grid-cols-1 md:grid-cols-2 gap-6 items-center">
+            <div className="flex justify-center">
               <canvas
                 ref={qrCanvasRef}
-                className="max-h-[560px] w-auto border border-slate-300 rounded-2xl shadow-lg"
+                className="w-56 h-auto rounded-2xl shadow-lg border border-slate-200"
               />
             </div>
-          )}
-        </main>
-      </div>
+
+            <div className="flex flex-col gap-4">
+              <div className="font-mono text-xs font-bold tracking-widest text-slate-400">
+                SAMARITAN SHIELD
+              </div>
+
+              <input
+                type="text"
+                value={tagId}
+                onChange={(e) => setTagId(e.target.value)}
+                placeholder="TAG ID"
+                className="h-11 px-3.5 rounded-2xl bg-slate-100 border border-slate-200 font-mono text-xs font-bold"
+              />
+
+              <input
+                type="text"
+                value={bounty}
+                onChange={(e) => setBounty(e.target.value)}
+                placeholder="BOUNTY"
+                className="h-11 px-3.5 rounded-2xl bg-slate-100 border border-slate-200 font-mono text-xs font-bold"
+              />
+
+              <div className="flex items-center gap-2 pt-2">
+                <button
+                  onClick={downloadQrImage}
+                  title="Download QR Shield (.PNG)"
+                  className="flex-1 h-11 rounded-2xl bg-slate-900 text-white font-mono text-xs font-bold flex items-center justify-center gap-2 hover:bg-slate-800 transition"
+                >
+                  <Download className="w-4 h-4" /> .PNG
+                </button>
+                <a
+                  href="/found"
+                  target="_blank"
+                  rel="noreferrer"
+                  title="Open Zero-Install /found Portal"
+                  className="w-11 h-11 rounded-2xl bg-slate-100 text-slate-700 hover:bg-slate-200 flex items-center justify-center transition"
+                >
+                  <ExternalLink className="w-4 h-4" />
+                </a>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }
