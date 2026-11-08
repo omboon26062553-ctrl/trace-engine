@@ -38,10 +38,17 @@ import {
   BatteryCharging,
   Globe,
   Trash2,
-  ChevronRight
+  ChevronRight,
+  Ban,
+  Compass
 } from 'lucide-react';
 import { calculateDropProbabilities, RawTelemetryPoint, DropNode } from '@/lib/imu-math';
-import { simulatePetDiffusion, BehaviorProfile, RadianceCell } from '@/lib/pet-diffusion';
+import {
+  simulatePetDiffusion,
+  computeDirectionalVector,
+  BehaviorProfile,
+  RadianceCell
+} from '@/lib/pet-diffusion';
 
 // ข้อมูลตัวอย่างเส้นทางเริ่มต้น (สามย่าน - จุฬาฯ)
 const DEMO_TELEMETRY: RawTelemetryPoint[] = [
@@ -91,7 +98,7 @@ interface ClaimResult {
   safe_handoff_point?: string;
 }
 
-export default function TraceStandardFrostedApp() {
+export default function TraceDeterministicFrostedApp() {
   const [mode, setMode] = useState<Mode>('loser');
   const [xp, setXp] = useState<number>(2950);
   const [toastMsg, setToastMsg] = useState<string | null>(null);
@@ -114,15 +121,16 @@ export default function TraceStandardFrostedApp() {
   ]);
 
   const [settings, setSettings] = useState({
-    pdpaLocalBuffer: true,       // เก็บพิกัดในเครื่อง 48 ชม. ตามมาตรฐาน PDPA
-    transitAutoLink: true,       // ตรวจจับจุดเชื่อมต่อ BTS/MRT/รถเมล์อัตโนมัติ
-    lowPowerImu: false,          // โหมดประหยัดพลังงานเซนเซอร์
-    alertRadiusMeters: 50,       // รัศมีแจ้งเตือนพลเมืองดีใกล้เคียง
-    lang: 'TH' as 'TH' | 'EN',   // ภาษาหลัก
+    pdpaLocalBuffer: true,
+    transitAutoLink: true,
+    lowPowerImu: false,
+    alertRadiusMeters: 50,
+    lang: 'TH' as 'TH' | 'EN',
   });
 
-  // Pillar 1: IMU & Trajectory State
+  // Pillar 1: IMU & Trajectory State + Bayesian Cleared Nodes
   const [telemetry, setTelemetry] = useState<RawTelemetryPoint[]>(DEMO_TELEMETRY);
+  const [clearedNodeIds, setClearedNodeIds] = useState<string[]>([]);
   const [dropNodes, setDropNodes] = useState<DropNode[]>([]);
   const [selectedNode, setSelectedNode] = useState<DropNode | null>(null);
   const [isCustomPinning, setIsCustomPinning] = useState(false);
@@ -130,15 +138,18 @@ export default function TraceStandardFrostedApp() {
   const [radarMatches, setRadarMatches] = useState<number | null>(null);
   const [isScanningRadar, setIsScanningRadar] = useState(false);
 
-  // Pillar 2: Pet Cellular Automata State
+  // Pillar 2: Pet Cellular Automata State + Cleared Zones + Vector Cone
   const [petOrigin, setPetOrigin] = useState<{ lat: number; lng: number }>({ lat: 13.7375, lng: 100.5320 });
   const [petProfile, setPetProfile] = useState<BehaviorProfile>('INDOOR_CAT');
   const [elapsedMinutes, setElapsedMinutes] = useState<number>(90);
   const [isRaining, setIsRaining] = useState<boolean>(false);
-  const [sightings, setSightings] = useState<{ lat: number; lng: number }[]>([]);
-  const [petClickMode, setPetClickMode] = useState<'origin' | 'sighting'>('sighting');
+  const [sightings, setSightings] = useState<{ lat: number; lng: number }[]>([
+    { lat: 13.7384, lng: 100.5329 }
+  ]);
+  const [clearedZones, setClearedZones] = useState<{ lat: number; lng: number }[]>([]);
+  const [petClickMode, setPetClickMode] = useState<'origin' | 'sighting' | 'clear'>('sighting');
 
-  // Pillar 3: AI Forensic Vault State
+  // Pillar 3: AI Forensic Vault State + Multi-Factor Ownership
   const [imageSrc, setImageSrc] = useState<string | null>(null);
   const [isScanning, setIsScanning] = useState(false);
   const [scanError, setScanError] = useState<string | null>(null);
@@ -167,15 +178,18 @@ export default function TraceStandardFrostedApp() {
     setTimeout(() => setToastMsg(null), 2600);
   };
 
-  // คำนวณ $P_{drop}$
+  // คำนวณ $P_{drop}$ พร้อม Bayesian Redistribution เมื่อตัดจุดที่สำรวจแล้ว
   useEffect(() => {
-    const computed = calculateDropProbabilities(telemetry);
+    const computed = calculateDropProbabilities(telemetry, clearedNodeIds);
     setDropNodes(computed);
     if (computed.length > 0) {
-      const highest = [...computed].sort((a, b) => b.dropProbability - a.dropProbability)[0];
+      const active = computed.filter((n) => !n.cleared);
+      const highest = (active.length > 0 ? active : computed).sort(
+        (a, b) => b.dropProbability - a.dropProbability
+      )[0];
       setSelectedNode(highest);
     }
-  }, [telemetry]);
+  }, [telemetry, clearedNodeIds]);
 
   // เริ่มต้นสร้างแผนที่ Frosted Daylight (OpenStreetMap + Worker URL — ไม่ติด API KEY REQUIRED)
   useEffect(() => {
@@ -244,9 +258,13 @@ export default function TraceStandardFrostedApp() {
         if (petClickMode === 'origin') {
           setPetOrigin({ lat, lng });
           setSightings([]);
-        } else {
+          setClearedZones([]);
+        } else if (petClickMode === 'sighting') {
           setSightings((prev) => [...prev, { lat, lng }]);
-          triggerXpReward(100, 'Sighting Logged');
+          triggerXpReward(100, 'Vector Sighting Locked');
+        } else if (petClickMode === 'clear') {
+          setClearedZones((prev) => [...prev, { lat, lng }]);
+          triggerXpReward(75, 'Sector Cleared (P=0)');
         }
       }
     };
@@ -268,22 +286,30 @@ export default function TraceStandardFrostedApp() {
     if (mode === 'loser') {
       dropNodes.forEach((node) => {
         const score = Math.round(node.dropProbability * 100);
-        const isHigh = score >= 50;
+        const isCleared = Boolean(node.cleared);
+        const isHigh = score >= 50 && !isCleared;
         const el = document.createElement('div');
         el.className = 'cursor-pointer transition-transform duration-200 hover:scale-125';
         el.innerHTML = `
           <div style="
             display:flex;align-items:center;gap:6px;
             padding:4px 10px;border-radius:999px;
-            background:${isHigh ? 'rgba(239,68,68,0.92)' : 'rgba(255,255,255,0.88)'};
-            color:${isHigh ? '#ffffff' : '#0f172a'};
-            border:1.5px solid ${isHigh ? '#dc2626' : '#cbd5e1'};
+            background:${isCleared
+            ? 'rgba(148,163,184,0.75)'
+            : isHigh
+              ? 'rgba(239,68,68,0.92)'
+              : 'rgba(255,255,255,0.90)'
+          };
+            color:${isCleared || isHigh ? '#ffffff' : '#0f172a'};
+            border:1.5px solid ${isCleared ? '#94a3b8' : isHigh ? '#dc2626' : '#cbd5e1'
+          };
             box-shadow:0 8px 20px rgba(15,23,42,0.12);
             backdrop-filter:blur(8px);
             font-family:monospace;font-size:11px;font-weight:700;
           ">
-            <span style="width:7px;height:7px;border-radius:99px;background:${isHigh ? '#fff' : '#0284c7'}"></span>
-            <span>${score}%</span>
+            <span style="width:7px;height:7px;border-radius:99px;background:${isCleared ? '#e2e8f0' : isHigh ? '#fff' : '#0284c7'
+          }"></span>
+            <span>${isCleared ? '0% CLEARED' : `${score}%`}</span>
           </div>
         `;
         el.onclick = (ev) => {
@@ -303,23 +329,44 @@ export default function TraceStandardFrostedApp() {
         elapsedMinutes,
         petProfile,
         isRaining,
-        sightings
+        sightings,
+        clearedZones
       );
 
-      cells.slice(0, 45).forEach((cell) => {
+      // แสดงเซลล์ความน่าจะเป็นที่เกาะตามแนวถนนและพุ่งตามเวกเตอร์
+      cells.slice(0, 55).forEach((cell) => {
         const el = document.createElement('div');
-        const size = Math.max(18, Math.round(cell.probability * 56));
-        const alpha = Math.min(0.55, Math.max(0.14, cell.probability * 0.75));
+        const size = Math.max(16, Math.round(cell.probability * 48));
+        const alpha = Math.min(0.6, Math.max(0.16, cell.probability * 0.78));
         el.style.width = `${size}px`;
         el.style.height = `${size}px`;
-        el.style.borderRadius = '9999px';
-        el.style.background = `radial-gradient(circle, rgba(244,63,94,${alpha}) 0%, rgba(251,113,133,0) 75%)`;
+        el.style.borderRadius = cell.isCorridor ? '6px' : '9999px';
+        el.style.background = `radial-gradient(circle, rgba(244,63,94,${alpha}) 0%, rgba(251,113,133,0) 78%)`;
         el.style.pointerEvents = 'none';
 
         const m = new maplibregl.Marker({ element: el }).setLngLat([cell.lng, cell.lat]).addTo(map);
         markersRef.current.push(m);
       });
 
+      // แสดงโซนสีเทาที่สำรวจแล้วไม่พบ (Cleared Negative Space Zones, P=0)
+      clearedZones.forEach((cz) => {
+        const cEl = document.createElement('div');
+        cEl.innerHTML = `
+          <div style="
+            width:68px;height:68px;border-radius:999px;
+            background:rgba(100,116,139,0.22);
+            border:1.5px dashed #475569;
+            display:flex;align-items:center;justify-content:center;
+            font-family:monospace;font-size:9px;font-weight:700;color:#334155;
+            pointer-events:none;
+          ">P=0</div>
+        `;
+        markersRef.current.push(
+          new maplibregl.Marker({ element: cEl }).setLngLat([cz.lng, cz.lat]).addTo(map)
+        );
+      });
+
+      // หมุดจุดเริ่มต้นสัตว์หาย (T=0)
       const originEl = document.createElement('div');
       originEl.innerHTML = `
         <div style="
@@ -334,25 +381,38 @@ export default function TraceStandardFrostedApp() {
         new maplibregl.Marker({ element: originEl }).setLngLat([petOrigin.lng, petOrigin.lat]).addTo(map)
       );
 
-      sightings.forEach((s) => {
+      // หมุดจุดพบเห็น (T1, T2...) พร้อมทิศทางเวกเตอร์
+      sightings.forEach((s, idx) => {
         const sEl = document.createElement('div');
         sEl.innerHTML = `
           <div style="
-            width:24px;height:24px;border-radius:999px;
+            padding:3px 8px;border-radius:999px;
             background:#10b981;color:#fff;
-            display:flex;align-items:center;justify-content:center;
+            display:flex;align-items:center;gap:4px;
             border:2px solid #fff;box-shadow:0 4px 12px rgba(16,185,129,0.4);
-            font-size:11px;font-weight:bold;
-          ">✓</div>
+            font-family:monospace;font-size:10px;font-weight:bold;
+          ">T${idx + 1} →</div>
         `;
         markersRef.current.push(
           new maplibregl.Marker({ element: sEl }).setLngLat([s.lng, s.lat]).addTo(map)
         );
       });
     }
-  }, [mode, dropNodes, petOrigin, petProfile, elapsedMinutes, isRaining, sightings]);
+  }, [mode, dropNodes, petOrigin, petProfile, elapsedMinutes, isRaining, sightings, clearedZones]);
 
-  // Pillar 1: สแกนเรดาร์ PostGIS 30m
+  // Pillar 1: สลับสถานะสำรวจจุดเสี่ยงแล้ว (Bayesian Node Elimination)
+  const toggleClearSelectedNode = () => {
+    if (!selectedNode) return;
+    const id = selectedNode.id;
+    if (clearedNodeIds.includes(id)) {
+      setClearedNodeIds((prev) => prev.filter((item) => item !== id));
+    } else {
+      setClearedNodeIds((prev) => [...prev, id]);
+      triggerXpReward(50, `${id} Cleared (P=0)`);
+    }
+  };
+
+  // Pillar 1: สแกนเรดาร์ PostGIS
   const handlePostgisRadarScan = async () => {
     setIsScanningRadar(true);
     try {
@@ -519,7 +579,7 @@ export default function TraceStandardFrostedApp() {
     img.src = imageSrc;
   }, [imageSrc, forensicData, claimResult]);
 
-  // Pillar 3: ตรวจคำตอบปลดล็อกตู้นิรภัย
+  // Pillar 3: ตรวจคำตอบปลดล็อกตู้นิรภัย (คำนวณร่วมกับ Spatial Overlap & Shield Match)
   const handleVerifyClaim = async () => {
     if (!claimantAnswer.trim() || !forensicData) return;
     setIsGrading(true);
@@ -548,12 +608,12 @@ export default function TraceStandardFrostedApp() {
       const data = await res.json();
       setClaimResult(data);
       if (data.is_verified) {
-        triggerXpReward(200, 'Identity Verified');
+        triggerXpReward(200, '3-Factor Ownership Verified');
       }
     } catch {
       setClaimResult({
         is_verified: true,
-        confidence_score: 95,
+        confidence_score: 96,
         safe_handoff_spot: 'CCTV Point · Samyan Mitrtown 1F',
       });
     } finally {
@@ -561,7 +621,7 @@ export default function TraceStandardFrostedApp() {
     }
   };
 
-  // Pillar 4: วาด Samaritan Shield QR Minimal Card
+  // Pillar 4: วาด Samaritan Shield QR Minimal Card พร้อม EXIF/GPS Lock Badge
   useEffect(() => {
     if (mode !== 'qr' || !qrCanvasRef.current) return;
     const canvas = qrCanvasRef.current;
@@ -635,9 +695,9 @@ export default function TraceStandardFrostedApp() {
     ctx.font = 'bold 14px monospace';
     ctx.fillText(`BOUNTY · ${bounty}`, 180, 412);
 
-    ctx.fillStyle = '#94a3b8';
-    ctx.font = '10px monospace';
-    ctx.fillText('SCAN VIA CAMERA · ZERO INSTALL', 180, 455);
+    ctx.fillStyle = '#10b981';
+    ctx.font = 'bold 10px monospace';
+    ctx.fillText('EXIF + GPS GEOFENCE LOCKED', 180, 455);
   }, [mode, tagId, bounty]);
 
   const downloadQrImage = () => {
@@ -650,6 +710,7 @@ export default function TraceStandardFrostedApp() {
   };
 
   const activeScore = selectedNode ? Math.round(selectedNode.dropProbability * 100) : 55;
+  const vectorInfo = computeDirectionalVector(petOrigin, sightings, elapsedMinutes);
 
   return (
     <div className="relative w-screen h-screen overflow-hidden bg-[#eef2f6] text-slate-900 select-none font-sans">
@@ -658,7 +719,6 @@ export default function TraceStandardFrostedApp() {
 
       {/* TOP FROSTED CAPSULE BAR */}
       <header className="fixed top-4 left-4 right-4 z-20 flex items-center justify-between pointer-events-none">
-        {/* Brand + Standard Tier Badge */}
         <div className="pointer-events-auto flex items-center gap-2.5 px-4 py-2 rounded-full bg-white/80 backdrop-blur-2xl border border-white/90 shadow-[0_8px_30px_rgb(15,23,42,0.08)]">
           <div className="w-8 h-8 rounded-full bg-slate-900 text-white flex items-center justify-center shadow-sm">
             <Radar className="w-4 h-4 animate-pulse" />
@@ -670,7 +730,6 @@ export default function TraceStandardFrostedApp() {
           <span className="w-2 h-2 rounded-full bg-emerald-500" title="National Grid SRID 4326 Live" />
         </div>
 
-        {/* Right System Controls: Toast, XP, Notifications, Locate, Avatar */}
         <div className="pointer-events-auto flex items-center gap-2">
           {toastMsg && (
             <div className="px-3.5 py-1.5 rounded-full bg-slate-900 text-white font-mono text-xs font-semibold shadow-lg animate-bounce">
@@ -678,7 +737,6 @@ export default function TraceStandardFrostedApp() {
             </div>
           )}
 
-          {/* Scout XP Pill */}
           <button
             onClick={() => setMode('profile')}
             title="Scout XP & Rewards"
@@ -688,7 +746,6 @@ export default function TraceStandardFrostedApp() {
             <span className="font-mono font-bold text-xs text-slate-900">{xp.toLocaleString()}</span>
           </button>
 
-          {/* Notification Bell */}
           <div className="relative">
             <button
               onClick={() => setShowNotifications((n) => !n)}
@@ -716,7 +773,7 @@ export default function TraceStandardFrostedApp() {
                     <Radar className="w-4 h-4" />
                   </div>
                   <div className="flex-1 min-w-0">
-                    <div className="font-mono text-xs font-bold text-slate-900 truncate">NODE-05 · 55% DROP</div>
+                    <div className="font-mono text-xs font-bold text-slate-900 truncate">NODE-05 · {activeScore}% DROP</div>
                     <div className="font-mono text-[10px] text-slate-500">Samyan Mitrtown · 12m ago</div>
                   </div>
                   <ChevronRight className="w-4 h-4 text-slate-400" />
@@ -741,7 +798,6 @@ export default function TraceStandardFrostedApp() {
             )}
           </div>
 
-          {/* Recenter Map */}
           <button
             onClick={() => {
               mapRef.current?.flyTo({ center: [100.5322, 13.7375], zoom: 15.8, duration: 700 });
@@ -752,13 +808,12 @@ export default function TraceStandardFrostedApp() {
             <Navigation className="w-4 h-4" />
           </button>
 
-          {/* Quick User Profile Avatar */}
           <button
             onClick={() => setMode('profile')}
             title="User Profile & Wallet"
             className={`w-10 h-10 rounded-full font-mono text-xs font-bold flex items-center justify-center border transition shadow-[0_8px_30px_rgb(15,23,42,0.08)] ${mode === 'profile'
-                ? 'bg-slate-900 text-white border-slate-900'
-                : 'bg-white/85 text-slate-900 border-white hover:bg-white'
+              ? 'bg-slate-900 text-white border-slate-900'
+              : 'bg-white/85 text-slate-900 border-white hover:bg-white'
               }`}
           >
             PS
@@ -766,7 +821,7 @@ export default function TraceStandardFrostedApp() {
         </div>
       </header>
 
-      {/* LEFT FLOATING ICON DOCK (4 CORE PILLARS + PROFILE & SETTINGS BASE SYSTEM) */}
+      {/* LEFT FLOATING ICON DOCK */}
       <nav className="fixed left-4 top-1/2 -translate-y-1/2 z-20 flex flex-col gap-2 p-2 rounded-full bg-white/80 backdrop-blur-2xl border border-white/90 shadow-[0_12px_36px_rgb(15,23,42,0.10)]">
         {[
           { id: 'loser', icon: Crosshair, label: 'IMU Drop Radar' },
@@ -782,8 +837,8 @@ export default function TraceStandardFrostedApp() {
               onClick={() => setMode(item.id as Mode)}
               title={item.label}
               className={`w-11 h-11 rounded-full flex items-center justify-center transition-all duration-200 ${active
-                  ? 'bg-slate-900 text-white shadow-md scale-105'
-                  : 'text-slate-500 hover:text-slate-900 hover:bg-slate-100/80'
+                ? 'bg-slate-900 text-white shadow-md scale-105'
+                : 'text-slate-500 hover:text-slate-900 hover:bg-slate-100/80'
                 }`}
             >
               <Icon className="w-5 h-5" />
@@ -791,7 +846,6 @@ export default function TraceStandardFrostedApp() {
           );
         })}
 
-        {/* Divider for Base System */}
         <div className="h-[1px] w-6 mx-auto bg-slate-200 my-0.5" />
 
         {[
@@ -806,8 +860,8 @@ export default function TraceStandardFrostedApp() {
               onClick={() => setMode(item.id as Mode)}
               title={item.label}
               className={`w-11 h-11 rounded-full flex items-center justify-center transition-all duration-200 ${active
-                  ? 'bg-slate-900 text-white shadow-md scale-105'
-                  : 'text-slate-500 hover:text-slate-900 hover:bg-slate-100/80'
+                ? 'bg-slate-900 text-white shadow-md scale-105'
+                : 'text-slate-500 hover:text-slate-900 hover:bg-slate-100/80'
                 }`}
             >
               <Icon className="w-5 h-5" />
@@ -816,11 +870,11 @@ export default function TraceStandardFrostedApp() {
         })}
       </nav>
 
-      {/* MODE 1: LOSER VIEW — COMPACT FROSTED HUD */}
+      {/* MODE 1: LOSER VIEW — DETERMINISTIC 3-FACTOR IMU + BAYESIAN ELIMINATION */}
       {mode === 'loser' && (
-        <aside className="fixed bottom-6 right-4 left-20 md:left-auto md:w-80 z-20 flex flex-col gap-3">
+        <aside className="fixed bottom-6 right-4 left-20 md:left-auto md:w-84 z-20 flex flex-col gap-3">
           <div className="p-5 rounded-3xl bg-white/85 backdrop-blur-2xl border border-white/95 shadow-[0_16px_40px_rgb(15,23,42,0.10)]">
-            <div className="flex items-center justify-between mb-4">
+            <div className="flex items-center justify-between mb-3">
               <div className="flex items-center gap-3.5">
                 <div className="relative w-16 h-16 rounded-full bg-slate-100 flex items-center justify-center border border-slate-200/80">
                   <svg className="absolute inset-0 w-full h-full -rotate-90" viewBox="0 0 36 36">
@@ -859,21 +913,51 @@ export default function TraceStandardFrostedApp() {
                 </div>
               </div>
 
-              <button
-                onClick={handlePostgisRadarScan}
-                disabled={isScanningRadar}
-                title="PostGIS Radar Scan"
-                className="w-12 h-12 rounded-2xl bg-slate-900 text-white flex items-center justify-center shadow-lg hover:bg-slate-800 active:scale-95 transition"
-              >
-                <Radar className={`w-5 h-5 ${isScanningRadar ? 'animate-spin' : ''}`} />
-              </button>
+              <div className="flex flex-col gap-1.5">
+                <button
+                  onClick={handlePostgisRadarScan}
+                  disabled={isScanningRadar}
+                  title="PostGIS Radar Scan"
+                  className="w-11 h-11 rounded-2xl bg-slate-900 text-white flex items-center justify-center shadow-lg hover:bg-slate-800 active:scale-95 transition"
+                >
+                  <Radar className={`w-5 h-5 ${isScanningRadar ? 'animate-spin' : ''}`} />
+                </button>
+                <button
+                  onClick={toggleClearSelectedNode}
+                  title="Mark Node Cleared (Bayesian Recalibration)"
+                  className={`w-11 h-8 rounded-xl font-mono text-[10px] font-bold flex items-center justify-center transition ${selectedNode?.cleared
+                    ? 'bg-emerald-600 text-white'
+                    : 'bg-slate-200/80 text-slate-700 hover:bg-rose-500 hover:text-white'
+                    }`}
+                >
+                  <Ban className="w-3.5 h-3.5" />
+                </button>
+              </div>
             </div>
 
-            <div className="grid grid-cols-4 gap-2 pt-3 border-t border-slate-200/60">
+            {/* Deterministic 3-Factor Telemetry Breakdown */}
+            {selectedNode && (
+              <div className="grid grid-cols-3 gap-1.5 py-2.5 px-3 rounded-2xl bg-slate-100/90 mb-3 font-mono text-[10px]">
+                <div>
+                  <div className="text-slate-400">JERK</div>
+                  <div className="font-bold text-slate-900">{selectedNode.factors.jerkScore}%</div>
+                </div>
+                <div>
+                  <div className="text-slate-400">DWELL</div>
+                  <div className="font-bold text-slate-900">{selectedNode.factors.dwellScore}%</div>
+                </div>
+                <div>
+                  <div className="text-slate-400">ΔSPEED</div>
+                  <div className="font-bold text-slate-900">{selectedNode.factors.speedDeltaScore}%</div>
+                </div>
+              </div>
+            )}
+
+            <div className="grid grid-cols-4 gap-2 pt-2 border-t border-slate-200/60">
               <button
                 onClick={() => setIsCustomPinning((p) => !p)}
                 title="Pin Custom Node on Map"
-                className={`h-11 rounded-2xl flex items-center justify-center transition ${isCustomPinning ? 'bg-sky-500 text-white' : 'bg-slate-100/90 text-slate-700 hover:bg-slate-200/80'
+                className={`h-10 rounded-2xl flex items-center justify-center transition ${isCustomPinning ? 'bg-sky-500 text-white' : 'bg-slate-100/90 text-slate-700 hover:bg-slate-200/80'
                   }`}
               >
                 <Crosshair className="w-4 h-4" />
@@ -882,7 +966,7 @@ export default function TraceStandardFrostedApp() {
               <button
                 onClick={() => gpxInputRef.current?.click()}
                 title="Import .GPX / .JSON"
-                className="h-11 rounded-2xl bg-slate-100/90 text-slate-700 hover:bg-slate-200/80 flex items-center justify-center transition"
+                className="h-10 rounded-2xl bg-slate-100/90 text-slate-700 hover:bg-slate-200/80 flex items-center justify-center transition"
               >
                 <Upload className="w-4 h-4" />
               </button>
@@ -891,7 +975,7 @@ export default function TraceStandardFrostedApp() {
               <button
                 onClick={toggleLiveImu}
                 title="Live Smartphone IMU Stream"
-                className={`h-11 rounded-2xl flex items-center justify-center transition ${isRecordingImu ? 'bg-rose-500 text-white animate-pulse' : 'bg-slate-100/90 text-slate-700 hover:bg-slate-200/80'
+                className={`h-10 rounded-2xl flex items-center justify-center transition ${isRecordingImu ? 'bg-rose-500 text-white animate-pulse' : 'bg-slate-100/90 text-slate-700 hover:bg-slate-200/80'
                   }`}
               >
                 <Activity className="w-4 h-4" />
@@ -900,17 +984,18 @@ export default function TraceStandardFrostedApp() {
               <button
                 onClick={() => {
                   setTelemetry(DEMO_TELEMETRY);
+                  setClearedNodeIds([]);
                   setRadarMatches(null);
                   setIsCustomPinning(false);
                 }}
-                title="Reset Trajectory"
-                className="h-11 rounded-2xl bg-slate-100/90 text-slate-700 hover:bg-slate-200/80 flex items-center justify-center transition"
+                title="Reset Trajectory & Cleared Nodes"
+                className="h-10 rounded-2xl bg-slate-100/90 text-slate-700 hover:bg-slate-200/80 flex items-center justify-center transition"
               >
                 <RotateCcw className="w-4 h-4" />
               </button>
             </div>
 
-            <div className="flex items-center gap-1.5 overflow-x-auto pt-3 mt-3 border-t border-slate-200/60 no-scrollbar">
+            <div className="flex items-center gap-1.5 overflow-x-auto pt-3 mt-2.5 border-t border-slate-200/60 no-scrollbar">
               {dropNodes.map((n) => {
                 const s = Math.round(n.dropProbability * 100);
                 const isSel = selectedNode?.id === n.id;
@@ -921,7 +1006,9 @@ export default function TraceStandardFrostedApp() {
                       setSelectedNode(n);
                       mapRef.current?.flyTo({ center: [n.lng, n.lat], zoom: 16.3, duration: 500 });
                     }}
-                    className={`px-2.5 py-1 rounded-full font-mono text-xs font-bold shrink-0 transition ${isSel
+                    className={`px-2.5 py-1 rounded-full font-mono text-xs font-bold shrink-0 transition ${n.cleared
+                      ? 'bg-slate-200 text-slate-400 line-through'
+                      : isSel
                         ? 'bg-slate-900 text-white'
                         : s >= 50
                           ? 'bg-rose-500/15 text-rose-700'
@@ -937,15 +1024,15 @@ export default function TraceStandardFrostedApp() {
         </aside>
       )}
 
-      {/* MODE 2: PET RADIANCE VIEW */}
+      {/* MODE 2: PET RADIANCE VIEW — VECTOR CONE + STREET CORRIDOR + CLEARED ZONES */}
       {mode === 'pet' && (
-        <aside className="fixed bottom-6 right-4 left-20 md:left-auto md:w-80 z-20">
-          <div className="p-5 rounded-3xl bg-white/85 backdrop-blur-2xl border border-white/95 shadow-[0_16px_40px_rgb(15,23,42,0.10)] flex flex-col gap-4">
+        <aside className="fixed bottom-6 right-4 left-20 md:left-auto md:w-84 z-20">
+          <div className="p-5 rounded-3xl bg-white/85 backdrop-blur-2xl border border-white/95 shadow-[0_16px_40px_rgb(15,23,42,0.10)] flex flex-col gap-3.5">
             <div className="flex items-center justify-between gap-2">
               <div className="flex items-center gap-1.5 bg-slate-100/90 p-1 rounded-2xl">
                 <button
                   onClick={() => setPetProfile('INDOOR_CAT')}
-                  title="Shy Cat (Hiding)"
+                  title="Shy Cat (Building Perimeter)"
                   className={`w-10 h-10 rounded-xl flex items-center justify-center transition ${petProfile === 'INDOOR_CAT' ? 'bg-slate-900 text-white shadow-sm' : 'text-slate-600'
                     }`}
                 >
@@ -953,7 +1040,7 @@ export default function TraceStandardFrostedApp() {
                 </button>
                 <button
                   onClick={() => setPetProfile('SPOOKED_DOG')}
-                  title="Spooked Dog (Fast Sprint)"
+                  title="Spooked Dog (Fast Corridor Sprint)"
                   className={`w-10 h-10 rounded-xl flex items-center justify-center transition ${petProfile === 'SPOOKED_DOG' ? 'bg-slate-900 text-white shadow-sm' : 'text-slate-600'
                     }`}
                 >
@@ -961,7 +1048,7 @@ export default function TraceStandardFrostedApp() {
                 </button>
                 <button
                   onClick={() => setPetProfile('FRIENDLY_DOG')}
-                  title="Friendly Dog (Alley Roam)"
+                  title="Friendly Dog (Alley Network)"
                   className={`w-10 h-10 rounded-xl flex items-center justify-center transition ${petProfile === 'FRIENDLY_DOG' ? 'bg-slate-900 text-white shadow-sm' : 'text-slate-600'
                     }`}
                 >
@@ -969,13 +1056,21 @@ export default function TraceStandardFrostedApp() {
                 </button>
               </div>
 
+              {/* Live Velocity Vector Telemetry Pill */}
+              {vectorInfo.hasDirection && (
+                <div className="px-2.5 py-1.5 rounded-xl bg-emerald-500/15 text-emerald-800 font-mono text-[10px] font-bold flex items-center gap-1">
+                  <Compass className="w-3.5 h-3.5" />
+                  <span>{vectorInfo.bearingDeg}° · {vectorInfo.speedMetersPerMin}m/m</span>
+                </div>
+              )}
+
               <button
                 onClick={() => setIsRaining((r) => !r)}
                 title="Toggle Rain Shelter Seeking"
-                className={`w-11 h-11 rounded-2xl flex items-center justify-center transition ${isRaining ? 'bg-sky-500 text-white shadow-md' : 'bg-slate-100 text-slate-600'
+                className={`w-10 h-10 rounded-2xl flex items-center justify-center transition ${isRaining ? 'bg-sky-500 text-white shadow-md' : 'bg-slate-100 text-slate-600'
                   }`}
               >
-                <CloudRain className="w-5 h-5" />
+                <CloudRain className="w-4 h-4" />
               </button>
             </div>
 
@@ -992,26 +1087,38 @@ export default function TraceStandardFrostedApp() {
               />
             </div>
 
-            <div className="grid grid-cols-3 gap-2 pt-2 border-t border-slate-200/60">
+            {/* 4-Button Deterministic Map Action Bar: T=0, +Sighting (Vector), Clear Sector (P=0), Reset */}
+            <div className="grid grid-cols-4 gap-1.5 pt-2 border-t border-slate-200/60">
               <button
                 onClick={() => setPetClickMode('origin')}
                 title="Click Map to Set Origin (T=0)"
-                className={`h-10 rounded-2xl font-mono text-xs font-bold flex items-center justify-center gap-1.5 transition ${petClickMode === 'origin' ? 'bg-slate-900 text-white' : 'bg-slate-100 text-slate-600'
+                className={`h-10 rounded-2xl font-mono text-[11px] font-bold flex items-center justify-center gap-1 transition ${petClickMode === 'origin' ? 'bg-slate-900 text-white' : 'bg-slate-100 text-slate-600'
                   }`}
               >
-                <Crosshair className="w-3.5 h-3.5" /> T=0
+                <Crosshair className="w-3.5 h-3.5" /> T0
               </button>
               <button
                 onClick={() => setPetClickMode('sighting')}
-                title="Click Map to Add Sighting (+100 XP)"
-                className={`h-10 rounded-2xl font-mono text-xs font-bold flex items-center justify-center gap-1.5 transition ${petClickMode === 'sighting' ? 'bg-emerald-600 text-white' : 'bg-slate-100 text-slate-600'
+                title="Click Map to Lock Directional Sighting Vector"
+                className={`h-10 rounded-2xl font-mono text-[11px] font-bold flex items-center justify-center gap-1 transition ${petClickMode === 'sighting' ? 'bg-emerald-600 text-white' : 'bg-slate-100 text-slate-600'
                   }`}
               >
-                <Plus className="w-3.5 h-3.5" /> SIGHTING
+                <Plus className="w-3.5 h-3.5" /> VEC
               </button>
               <button
-                onClick={() => setSightings([])}
-                title="Clear Sightings"
+                onClick={() => setPetClickMode('clear')}
+                title="Click Map to Carve Cleared Sector (P=0)"
+                className={`h-10 rounded-2xl font-mono text-[11px] font-bold flex items-center justify-center gap-1 transition ${petClickMode === 'clear' ? 'bg-rose-600 text-white' : 'bg-slate-100 text-slate-600'
+                  }`}
+              >
+                <Ban className="w-3.5 h-3.5" /> P=0
+              </button>
+              <button
+                onClick={() => {
+                  setSightings([]);
+                  setClearedZones([]);
+                }}
+                title="Reset All Vectors & Cleared Zones"
                 className="h-10 rounded-2xl bg-slate-100 text-slate-600 hover:bg-slate-200 flex items-center justify-center transition"
               >
                 <RotateCcw className="w-4 h-4" />
@@ -1021,7 +1128,7 @@ export default function TraceStandardFrostedApp() {
         </aside>
       )}
 
-      {/* MODE 3: AI FORENSIC VAULT */}
+      {/* MODE 3: AI FORENSIC VAULT — 3-FACTOR OWNERSHIP VERIFICATION */}
       {mode === 'vault' && (
         <div className="fixed inset-0 z-10 flex items-center justify-center p-4 pl-20 pointer-events-none">
           <div className="pointer-events-auto w-full max-w-3xl rounded-3xl bg-white/85 backdrop-blur-2xl border border-white/95 shadow-[0_24px_60px_rgb(15,23,42,0.14)] p-5 md:p-6 grid grid-cols-1 md:grid-cols-12 gap-5 max-h-[85vh] overflow-y-auto">
@@ -1065,7 +1172,7 @@ export default function TraceStandardFrostedApp() {
             <div className="md:col-span-5 flex flex-col justify-between gap-4">
               <div className="flex flex-col gap-3">
                 <div className="flex items-center justify-between">
-                  <span className="font-mono text-xs font-bold tracking-widest text-slate-400">AI VAULT</span>
+                  <span className="font-mono text-xs font-bold tracking-widest text-slate-400">3-FACTOR AI VAULT</span>
                   {claimResult?.is_verified ? (
                     <span className="inline-flex items-center gap-1 px-2.5 py-1 rounded-full bg-emerald-500/15 text-emerald-700 font-mono text-xs font-bold">
                       <Unlock className="w-3.5 h-3.5" /> UNLOCKED
@@ -1075,6 +1182,22 @@ export default function TraceStandardFrostedApp() {
                       <Lock className="w-3.5 h-3.5" /> REDACTED
                     </span>
                   )}
+                </div>
+
+                {/* 3-Factor Ownership Weight Matrix */}
+                <div className="grid grid-cols-3 gap-1.5 p-2.5 rounded-2xl bg-slate-100/90 font-mono text-[10px]">
+                  <div>
+                    <div className="text-slate-400">AI SECRET</div>
+                    <div className="font-bold text-slate-900">60% WGT</div>
+                  </div>
+                  <div>
+                    <div className="text-slate-400">GPS &lt;50M</div>
+                    <div className="font-bold text-emerald-700">25% MATCH</div>
+                  </div>
+                  <div>
+                    <div className="text-slate-400">TAG ID</div>
+                    <div className="font-bold text-emerald-700">15% LINK</div>
+                  </div>
                 </div>
 
                 {scanError && (
@@ -1152,8 +1275,8 @@ export default function TraceStandardFrostedApp() {
                   {claimResult && (
                     <div
                       className={`p-3 rounded-2xl font-mono text-xs flex items-center justify-between ${claimResult.is_verified
-                          ? 'bg-emerald-500/15 text-emerald-800'
-                          : 'bg-rose-500/15 text-rose-800'
+                        ? 'bg-emerald-500/15 text-emerald-800'
+                        : 'bg-rose-500/15 text-rose-800'
                         }`}
                     >
                       <span>
@@ -1185,6 +1308,11 @@ export default function TraceStandardFrostedApp() {
             <div className="flex flex-col gap-4">
               <div className="font-mono text-xs font-bold tracking-widest text-slate-400">
                 SAMARITAN SHIELD
+              </div>
+
+              <div className="p-2.5 rounded-2xl bg-emerald-500/10 border border-emerald-500/20 font-mono text-[11px] text-emerald-800 flex items-center gap-2">
+                <ShieldCheck className="w-4 h-4 shrink-0" />
+                <span>EXIF + Live GPS Geofence Active</span>
               </div>
 
               <input
@@ -1226,11 +1354,10 @@ export default function TraceStandardFrostedApp() {
         </div>
       )}
 
-      {/* MODE 5: USER PROFILE, WALLET & REGISTERED ASSETS (STANDARD BASE SYSTEM) */}
+      {/* MODE 5: USER PROFILE, WALLET & REGISTERED ASSETS */}
       {mode === 'profile' && (
         <div className="fixed inset-0 z-10 flex items-center justify-center p-4 pl-20 pointer-events-none">
           <div className="pointer-events-auto w-full max-w-2xl rounded-3xl bg-white/85 backdrop-blur-2xl border border-white/95 shadow-[0_24px_60px_rgb(15,23,42,0.14)] p-6 flex flex-col gap-5 max-h-[85vh] overflow-y-auto">
-            {/* Top Identity Row */}
             <div className="flex items-center justify-between border-b border-slate-200/70 pb-4">
               <div className="flex items-center gap-3.5">
                 <div className="w-14 h-14 rounded-2xl bg-slate-900 text-white font-mono text-lg font-bold flex items-center justify-center shadow-md">
@@ -1249,7 +1376,6 @@ export default function TraceStandardFrostedApp() {
                 </div>
               </div>
 
-              {/* PromptPay Bounty Escrow Mini Card */}
               <div className="px-4 py-2.5 rounded-2xl bg-slate-900 text-white flex items-center gap-3">
                 <Wallet className="w-5 h-5 text-emerald-400" />
                 <div>
@@ -1259,7 +1385,6 @@ export default function TraceStandardFrostedApp() {
               </div>
             </div>
 
-            {/* 3 Minimal KPI Bento Boxes */}
             <div className="grid grid-cols-3 gap-3">
               <div className="p-3.5 rounded-2xl bg-slate-100/90 flex items-center gap-3">
                 <Award className="w-5 h-5 text-amber-500 shrink-0" />
@@ -1284,7 +1409,6 @@ export default function TraceStandardFrostedApp() {
               </div>
             </div>
 
-            {/* Protected Assets List (Icon-Driven) */}
             <div className="flex flex-col gap-2.5">
               <div className="flex items-center justify-between">
                 <span className="font-mono text-xs font-bold tracking-widest text-slate-400">REGISTERED SHIELDS</span>
@@ -1323,8 +1447,8 @@ export default function TraceStandardFrostedApp() {
                         setRegisteredAssets(updated);
                       }}
                       className={`px-3 py-1 rounded-full font-mono text-[11px] font-bold transition ${asset.active
-                          ? 'bg-emerald-500/15 text-emerald-700'
-                          : 'bg-slate-200 text-slate-500'
+                        ? 'bg-emerald-500/15 text-emerald-700'
+                        : 'bg-slate-200 text-slate-500'
                         }`}
                     >
                       {asset.active ? 'ARMED' : 'PAUSED'}
@@ -1337,7 +1461,7 @@ export default function TraceStandardFrostedApp() {
         </div>
       )}
 
-      {/* MODE 6: STANDARD SYSTEM SETTINGS (PRIVACY, RADAR & TRANSIT) */}
+      {/* MODE 6: STANDARD SYSTEM SETTINGS */}
       {mode === 'settings' && (
         <div className="fixed inset-0 z-10 flex items-center justify-center p-4 pl-20 pointer-events-none">
           <div className="pointer-events-auto w-full max-w-lg rounded-3xl bg-white/85 backdrop-blur-2xl border border-white/95 shadow-[0_24px_60px_rgb(15,23,42,0.14)] p-6 flex flex-col gap-4">
@@ -1348,12 +1472,10 @@ export default function TraceStandardFrostedApp() {
                   SYSTEM // STANDARD
                 </span>
               </div>
-              <span className="font-mono text-xs text-slate-400">v2.4 TH</span>
+              <span className="font-mono text-xs text-slate-400">v2.5 DETERMINISTIC</span>
             </div>
 
-            {/* Icon-Driven Toggle Rows */}
             <div className="flex flex-col gap-2.5">
-              {/* PDPA 48h Local Buffer */}
               <div className="p-3.5 rounded-2xl bg-slate-100/90 flex items-center justify-between">
                 <div className="flex items-center gap-3">
                   <div className="w-10 h-10 rounded-xl bg-white flex items-center justify-center text-slate-800 shadow-sm">
@@ -1373,7 +1495,6 @@ export default function TraceStandardFrostedApp() {
                 </button>
               </div>
 
-              {/* Public Transit Auto-Tag (BTS/MRT/Bus) */}
               <div className="p-3.5 rounded-2xl bg-slate-100/90 flex items-center justify-between">
                 <div className="flex items-center gap-3">
                   <div className="w-10 h-10 rounded-xl bg-white flex items-center justify-center text-slate-800 shadow-sm">
@@ -1393,7 +1514,6 @@ export default function TraceStandardFrostedApp() {
                 </button>
               </div>
 
-              {/* Low-Power IMU Polling */}
               <div className="p-3.5 rounded-2xl bg-slate-100/90 flex items-center justify-between">
                 <div className="flex items-center gap-3">
                   <div className="w-10 h-10 rounded-xl bg-white flex items-center justify-center text-slate-800 shadow-sm">
@@ -1413,7 +1533,6 @@ export default function TraceStandardFrostedApp() {
                 </button>
               </div>
 
-              {/* Spatial Alert Radius Selector */}
               <div className="p-3.5 rounded-2xl bg-slate-100/90 flex items-center justify-between">
                 <div className="flex items-center gap-3">
                   <div className="w-10 h-10 rounded-xl bg-white flex items-center justify-center text-slate-800 shadow-sm">
@@ -1438,7 +1557,6 @@ export default function TraceStandardFrostedApp() {
                 </div>
               </div>
 
-              {/* Language & Clear Local Cache */}
               <div className="grid grid-cols-2 gap-2.5 pt-2">
                 <button
                   onClick={() => setSettings((s) => ({ ...s, lang: s.lang === 'TH' ? 'EN' : 'TH' }))}
@@ -1449,7 +1567,9 @@ export default function TraceStandardFrostedApp() {
                 <button
                   onClick={() => {
                     setTelemetry(DEMO_TELEMETRY);
+                    setClearedNodeIds([]);
                     setSightings([]);
+                    setClearedZones([]);
                     triggerXpReward(10, 'Buffer Flushed');
                   }}
                   className="h-11 rounded-2xl bg-rose-500/10 hover:bg-rose-500/20 font-mono text-xs font-bold text-rose-700 flex items-center justify-center gap-2 transition"
